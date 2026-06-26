@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Native build artifacts — regenerate with `bash native/build.sh` + `python native/bundle.py`
+native/libfxtls.dylib
+native/fxtls
+native/*.dSYM/
+native/vendor/
+
+# neqo: large third-party clone + Rust build (~343MB). See README for HTTP/3 setup.
+native/neqo/
+
+# Fingerprint capture artifacts (regenerable by the harness)
+captures/
+harness/localcap/*.json
+
+# Throwaway local CA + browser profile — contain PRIVATE KEYS, never publish
+harness/localcap/certs/
+harness/localcap/ffprofile/
+
+# macOS
+.DS_Store
