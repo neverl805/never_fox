@@ -68,8 +68,8 @@ def main():
         if got[k] != exp:
             ok = False
         print(f"  {k:8} = {got[k]}   (expect {exp})  [{mark}]")
-    print("\n✅ engine fingerprint == Firefox 152" if ok
-          else "\n❌ FINGERPRINT DRIFT — this platform's NSS does not match Firefox 152")
+    print("\nPASS: engine fingerprint == Firefox 152" if ok
+          else "\nFAIL: fingerprint drift -- this platform's NSS does not match Firefox 152")
     sys.exit(0 if ok else 1)
 
 
