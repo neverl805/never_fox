@@ -7,8 +7,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define access _access
+#define R_OK 4
+#else
 #include <unistd.h>
 #include <dlfcn.h>
+#endif
 #include <prinit.h>
 #include <prio.h>
 #include <prnetdb.h>
@@ -18,6 +25,14 @@
 #include <cert.h>
 #include <secmod.h>
 #include "fxtls_config.h"
+
+#ifdef _WIN32
+#define FXTLS_CKBI "nssckbi.dll"
+#elif defined(__APPLE__)
+#define FXTLS_CKBI "libnssckbi.dylib"
+#else
+#define FXTLS_CKBI "libnssckbi.so"
+#endif
 
 typedef struct { PRFileDesc *fd; char alpn[24]; } fxtls_ctx;
 
@@ -31,27 +46,45 @@ static SECStatus fxtls__accept(void *arg, PRFileDesc *fd, PRBool cs, PRBool srv)
 
 /* directory containing this shared library (for locating a vendored libnssckbi) */
 static void fxtls__self_dir(char *out, size_t n) {
-    Dl_info info;
     out[0] = 0;
+#ifdef _WIN32
+    HMODULE h = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)&g_init, &h) &&
+        GetModuleFileNameA(h, out, (DWORD)n)) {
+        char *s1 = strrchr(out, '\\'), *s2 = strrchr(out, '/');
+        char *slash = s1 > s2 ? s1 : s2;
+        if (slash) *slash = 0; else out[0] = 0;
+    }
+#else
+    Dl_info info;
     if (dladdr((void *)&g_init, &info) && info.dli_fname) {
         strncpy(out, info.dli_fname, n - 1); out[n - 1] = 0;
         char *slash = strrchr(out, '/'); if (slash) *slash = 0; else out[0] = 0;
     }
+#endif
 }
 
 /* load NSS's builtin Mozilla CA roots (the trust store Firefox uses) */
 static void fxtls__load_roots(void) {
     char dir[1024], path[1200];
     const char *env = getenv("FXTLS_CA_MODULE");
-    const char *cands[4]; int nc = 0;
+    const char *cands[8]; int nc = 0;
     if (env) cands[nc++] = env;
     fxtls__self_dir(dir, sizeof(dir));
     static char p1[1200], p2[1200];
     if (dir[0]) {
-        snprintf(p1, sizeof(p1), "%s/vendor/libnssckbi.dylib", dir); cands[nc++] = p1;
-        snprintf(p2, sizeof(p2), "%s/libnssckbi.dylib", dir);        cands[nc++] = p2;
+        snprintf(p1, sizeof(p1), "%s/vendor/%s", dir, FXTLS_CKBI); cands[nc++] = p1;
+        snprintf(p2, sizeof(p2), "%s/%s", dir, FXTLS_CKBI);        cands[nc++] = p2;
     }
-    cands[nc++] = "/opt/homebrew/opt/nss/lib/libnssckbi.dylib";
+#ifdef __APPLE__
+    cands[nc++] = "/opt/homebrew/opt/nss/lib/" FXTLS_CKBI;
+#elif !defined(_WIN32)
+    cands[nc++] = "/usr/lib/x86_64-linux-gnu/nss/" FXTLS_CKBI;
+    cands[nc++] = "/usr/lib/aarch64-linux-gnu/nss/" FXTLS_CKBI;
+    cands[nc++] = "/usr/lib64/" FXTLS_CKBI;
+#endif
     for (int i = 0; i < nc; i++) {
         if (access(cands[i], R_OK) != 0) continue;
         snprintf(path, sizeof(path),

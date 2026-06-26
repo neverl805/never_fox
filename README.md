@@ -33,24 +33,32 @@
 
 ## 环境要求与构建
 
-native 引擎是编译产物,**当前在 macOS arm64 构建**。其它平台(Linux / Intel mac)需在目标机重新构建。
+native 引擎是编译产物,按平台分发(像 Cronet)。**重依赖 NSS/NSPR/brotli/zstd 不用我们编译** —— 由各平台包管理器提供预编译版,我们只编 ~250 行的引擎(几秒)。
 
 ```bash
-# 1) 系统依赖
-brew install nss nspr nghttp2 brotli zstd          # macOS
-# Linux: 安装 libnss3-dev libnspr4-dev libnghttp2-dev libbrotli-dev libzstd-dev
+# 1) 系统依赖(预编译的 NSS 等)
+brew install nss nspr brotli zstd                                  # macOS
+sudo apt-get install libnss3-dev libnspr4-dev libbrotli-dev libzstd-dev zlib1g-dev patchelf  # Linux
+# Windows: MSYS2 装 mingw-w64-x86_64-{nss,nspr,brotli,zstd,zlib,gcc,pkg-config}
 
 # 2) Python 依赖
 pip install hpack brotli zstandard
 
-# 3) 编译原生引擎
-bash native/build.sh                                # -> native/libfxtls.dylib
+# 3) 跨平台编译(自动找 NSS,产出 libfxtls.{dylib,so,dll})
+python native/build.py
 
-# 4)(可选)打包成自包含,便于拷到同架构机器免依赖运行
-python native/bundle.py                             # -> native/vendor/
+# 4) 自检指纹 == Firefox 152(NSS 版本漂移会在这里报错)
+python native/verify.py
+
+# 5)(可选)打包自包含,拷到同 OS+架构机器免依赖运行
+python native/bundle.py                                            # -> native/vendor/
 ```
 
-然后把仓库目录加入 `PYTHONPATH` 或在仓库根目录使用:`import never_fox`。
+然后把仓库目录加入 `PYTHONPATH`,`import never_fox` 即可。
+
+### 多平台预编译(GitHub CI)
+
+`.github/workflows/build.yml` 用矩阵在 **Linux x86_64 / Linux arm64 / macOS arm64 / Windows x86_64** 原生 runner 上自动:装预编译 NSS → `build.py` → `verify.py` 指纹门禁 → 上传各平台产物;打 `vX.Y.Z` tag 会把四平台产物附到 GitHub Release。NSS 由包管理器缓存,只在升版本时重拉。
 
 ## 快速开始
 

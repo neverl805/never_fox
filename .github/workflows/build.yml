@@ -1,0 +1,102 @@
+name: build native engine
+
+# NSS/NSPR/brotli/zstd are NOT compiled here — they come prebuilt from each
+# platform's package manager (cached). Only the ~250-line engine compiles.
+# Every build is gated by a fingerprint check that asserts the output is
+# byte-for-byte Firefox 152.
+
+on:
+  push:
+    branches: [main]
+    paths: ["native/**", ".github/workflows/build.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+          - name: macos-arm64
+            os: macos-14
+          - name: windows-x86_64
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Linux: prebuilt NSS from apt ----
+      - name: deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3-dev libnspr4-dev libbrotli-dev libzstd-dev zlib1g-dev \
+            pkg-config patchelf
+      - name: build + verify (linux)
+        if: runner.os == 'Linux'
+        run: |
+          python3 native/build.py
+          python3 native/bundle.py || echo "bundle: best-effort"
+          python3 native/verify.py
+
+      # ---- macOS: prebuilt NSS from Homebrew ----
+      - name: deps (macos)
+        if: runner.os == 'macOS'
+        run: brew install nss nspr brotli zstd
+      - name: build + verify (macos)
+        if: runner.os == 'macOS'
+        run: |
+          python3 native/build.py
+          python3 native/bundle.py
+          python3 native/verify.py
+
+      # ---- Windows: prebuilt NSS from MSYS2 (mingw) ----
+      - name: setup msys2 (windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-nss mingw-w64-x86_64-nspr
+            mingw-w64-x86_64-brotli mingw-w64-x86_64-zstd mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-python
+      - name: build + verify (windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          python native/build.py
+          python native/bundle.py || echo "bundle: best-effort"
+          python native/verify.py
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: never_fox-engine-${{ matrix.name }}
+          path: |
+            native/libfxtls.*
+            native/vendor/**
+          if-no-files-found: warn
+
+  # Collect all platform builds onto a GitHub Release when tagging vX.Y.Z
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - name: zip per platform
+        run: |
+          cd dist
+          for d in */; do (cd "$d" && zip -r "../${d%/}.zip" .); done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

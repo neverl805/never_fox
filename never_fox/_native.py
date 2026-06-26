@@ -1,9 +1,16 @@
-"""ctypes binding to libfxtls.dylib — the real-NSS (Firefox 152) TLS transport.
+"""ctypes binding to the real-NSS (Firefox 152) TLS transport (libfxtls).
 Binary-safe read/write (h2 frames contain NUL bytes, so we never use c_char_p)."""
-import ctypes, os, base64
+import ctypes, os, sys, base64
 
-_DYLIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "native", "libfxtls.dylib")
-_lib = ctypes.CDLL(_DYLIB)
+_NATIVE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "native"))
+_LIBNAME = {"darwin": "libfxtls.dylib"}.get(sys.platform, "libfxtls.dll" if os.name == "nt" else "libfxtls.so")
+_LIBPATH = os.path.join(_NATIVE, _LIBNAME)
+if os.name == "nt":                              # let the loader find bundled NSS DLLs
+    for _d in (_NATIVE, os.path.join(_NATIVE, "vendor")):
+        if os.path.isdir(_d):
+            try: os.add_dll_directory(_d)
+            except (AttributeError, OSError): pass
+_lib = ctypes.CDLL(_LIBPATH)
 _lib.fxtls_connect.restype  = ctypes.c_void_p
 _lib.fxtls_connect.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 _lib.fxtls_connect_proxy.restype  = ctypes.c_void_p
