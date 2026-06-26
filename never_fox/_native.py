@@ -2,8 +2,11 @@
 Binary-safe read/write (h2 frames contain NUL bytes, so we never use c_char_p)."""
 import ctypes, os, sys, base64
 
-_NATIVE = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "native"))
 _LIBNAME = {"darwin": "libfxtls.dylib"}.get(sys.platform, "libfxtls.dll" if os.name == "nt" else "libfxtls.so")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_CANDS = [os.path.join(_HERE, "_lib"),                                  # installed wheel layout
+          os.path.abspath(os.path.join(_HERE, "..", "native"))]        # source-tree layout
+_NATIVE = next((d for d in _CANDS if os.path.exists(os.path.join(d, _LIBNAME))), _CANDS[0])
 _LIBPATH = os.path.join(_NATIVE, _LIBNAME)
 if os.name == "nt":                              # let the loader find bundled NSS DLLs
     for _d in (_NATIVE, os.path.join(_NATIVE, "vendor")):

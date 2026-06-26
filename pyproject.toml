@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "never_fox"
+version = "0.3.0"
+description = "Browser-level (Firefox 152) HTTP client — real NSS TLS, HTTP/2, byte-identical fingerprint"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "neverl805" }]
+keywords = ["tls", "fingerprint", "firefox", "ja3", "ja4", "http2", "nss", "anti-bot"]
+dependencies = ["hpack>=4.0", "brotli", "zstandard"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Internet :: WWW/HTTP",
+]
+
+[project.urls]
+Homepage = "https://github.com/neverl805/never_fox"
+
+[tool.setuptools]
+packages = ["never_fox"]
+
+[tool.setuptools.package-data]
+never_fox = ["_lib/*", "_lib/vendor/*"]

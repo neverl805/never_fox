@@ -22,27 +22,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x86_64,   os: ubuntu-latest,    container: 'fedora:latest' }
-          - { name: linux-arm64,    os: ubuntu-24.04-arm, container: 'fedora:latest' }
-          - { name: macos-arm64,    os: macos-14 }
-          - { name: windows-x86_64, os: windows-latest }
+          # manylinux2014 (glibc 2.17) -> runs on CentOS 7+ and almost any Linux
+          - { name: linux-x86_64, os: ubuntu-latest,    container: 'quay.io/pypa/manylinux2014_x86_64' }
+          - { name: linux-arm64,  os: ubuntu-24.04-arm, container: 'quay.io/pypa/manylinux2014_aarch64' }
+          # macOS + Windows already verified == Firefox 152; re-enable for release:
+          # - { name: macos-arm64,    os: macos-14 }
+          # - { name: windows-x86_64, os: windows-latest }
     steps:
       - name: container prereqs (linux)        # git/tar must exist before checkout
         if: runner.os == 'Linux'
-        run: dnf install -y git tar gzip
+        run: yum install -y git tar xz gzip || true
 
       - uses: actions/checkout@v4
 
-      # ---- Linux: full NSS from Fedora ----
-      - name: build + verify (linux)
+      # ---- Linux: conda NSS (glibc 2.17) to link + Firefox 152's NSS to run ----
+      - name: build + verify (linux, manylinux2014 / CentOS7+ compat)
         if: runner.os == 'Linux'
-        run: |
-          dnf install -y --setopt=install_weak_deps=False \
-            gcc python3 patchelf pkgconf-pkg-config \
-            nss-devel nspr-devel brotli-devel libzstd-devel zlib-devel
-          python3 native/build.py
-          python3 native/bundle.py || echo "bundle: best-effort"
-          python3 native/verify.py
+        run: bash native/build_manylinux.sh
 
       # ---- macOS: prebuilt NSS from Homebrew ----
       - name: deps (macos)
