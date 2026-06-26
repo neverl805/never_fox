@@ -63,3 +63,19 @@ PY
 
 # 4) verify — proves glibc-2.17 compatibility AND the FF152 fingerprint
 echo "=== verify.py ==="; python native/verify.py
+
+# 5) build the wheel, retag linux_* -> manylinux2014, smoke-test on a stock CPython
+echo "=== wheel ==="
+python native/stage_lib.py
+python -m pip install -q wheel
+rm -rf /tmp/wh; python -m pip wheel . --no-deps -w /tmp/wh
+W=$(ls /tmp/wh/never_fox-*.whl)
+python -m wheel tags --remove --platform-tag "manylinux_2_17_${ARCH}.manylinux2014_${ARCH}" "$W"
+mkdir -p "$REPO/dist"; cp /tmp/wh/never_fox-*.whl "$REPO/dist/"
+echo "--- built wheel ---"; ls -la "$REPO/dist/"
+echo "=== smoke test: install the wheel on stock CPython + init NSS ==="
+PYB="$(ls -d /opt/python/cp31*/bin 2>/dev/null | head -1)/python"
+"$PYB" -m pip install -q "$REPO"/dist/never_fox-*.whl
+"$PYB" -c "import never_fox; from never_fox import _native; \
+assert _native._lib.fxtls_have_roots() == 1, 'NSS init failed in installed wheel'; \
+print('  wheel import + NSS init OK on', '$ARCH')"
