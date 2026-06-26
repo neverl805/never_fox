@@ -41,7 +41,12 @@ def main():
     if not _wait_port(port):
         sink.terminate(); sys.exit("sink did not open")
 
-    from never_fox import _native
+    # load the ctypes binding directly (no package __init__ -> no hpack/etc. needed)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_fxtls_native", os.path.join(ROOT, "never_fox", "_native.py"))
+    _native = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_native)
     try:
         _native.Transport("localhost", port, 6, verify=False)   # sends the ClientHello
     except Exception:
