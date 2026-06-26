@@ -25,6 +25,7 @@ _lib.fxtls_connect_socks5.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_ch
 _lib.fxtls_have_roots.restype = ctypes.c_int
 _lib.fxtls_last_error.restype = ctypes.c_int
 _lib.fxtls_last_error_name.restype = ctypes.c_char_p
+_lib.fxtls_last_stage.restype = ctypes.c_char_p
 _lib.fxtls_alpn.argtypes    = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _lib.fxtls_write.argtypes   = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _lib.fxtls_read.argtypes    = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]

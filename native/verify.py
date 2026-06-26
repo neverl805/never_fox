@@ -57,8 +57,9 @@ def _capture():
         try:
             code = nat._lib.fxtls_last_error()
             name = (nat._lib.fxtls_last_error_name() or b"").decode()
+            stage = (nat._lib.fxtls_last_stage() or b"").decode()
             roots = nat._lib.fxtls_have_roots()
-            print(f"  NSS last error: {code} ({name}) | have_roots={roots}")
+            print(f"  failed at stage: {stage} | NSS error: {code} ({name}) | have_roots={roots}")
         except Exception as e:
             print(f"  (could not read NSS error: {e!r})")
         sys.exit(f"FAIL: engine produced no ClientHello (Transport error: {err!r})")
