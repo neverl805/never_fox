@@ -4,6 +4,9 @@
  *
  * Certificate validation uses NSS's builtin Mozilla root list (libnssckbi) — the
  * same trust store Firefox uses — when verify != 0. */
+#ifndef _WIN32
+#define _GNU_SOURCE             /* expose dladdr / Dl_info from <dlfcn.h> (glibc) */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
