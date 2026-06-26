@@ -100,6 +100,12 @@ static void fxtls__load_roots(void) {
 
 static void fxtls__ensure_init(void) {
     if (g_init) return;
+    /* Ignore the host's system crypto policy (Fedora/RHEL disable e.g. SHA1
+     * signature schemes), so our explicit Firefox-152 config is sent verbatim
+     * and the fingerprint stays identical regardless of the machine. Must be set
+     * before NSS initializes. */
+    static char nss_policy[] = "NSS_IGNORE_SYSTEM_POLICY=1";
+    putenv(nss_policy);
     PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
     NSS_NoDB_Init(".");
     NSS_SetDomesticPolicy();
