@@ -62,6 +62,9 @@ static void fxtls__self_dir(char *out, size_t n) {
         char *s1 = strrchr(out, '\\'), *s2 = strrchr(out, '/');
         char *slash = s1 > s2 ? s1 : s2;
         if (slash) *slash = 0; else out[0] = 0;
+        /* forward slashes: NSS module specs treat '\' as an escape, so a path
+         * like C:\Users\... would be mangled. LoadLibrary accepts '/' fine. */
+        for (char *p = out; *p; p++) if (*p == '\\') *p = '/';
     }
 #else
     Dl_info info;
