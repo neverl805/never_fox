@@ -76,10 +76,12 @@ def _bundle_linux():
     shutil.rmtree(VENDOR, ignore_errors=True); os.makedirs(VENDOR)
     dirs = _lib_dirs()
     copied = _copy_libs(dirs, ".so")
+    # --force-rpath sets DT_RPATH (not RUNPATH): NSS dlopens softokn/freebl by bare
+    # soname, and RUNPATH is ignored for dlopen — only RPATH applies.
     for f in glob.glob(os.path.join(VENDOR, "*.so*")):
-        sh("patchelf", "--set-rpath", "$ORIGIN", f)
+        sh("patchelf", "--force-rpath", "--set-rpath", "$ORIGIN", f)
     main = os.path.join(HERE, "libfxtls.so")
-    sh("patchelf", "--set-rpath", "$ORIGIN/vendor:$ORIGIN", main)
+    sh("patchelf", "--force-rpath", "--set-rpath", "$ORIGIN/vendor:$ORIGIN", main)
     print(f"OK linux: vendored {copied} .so files ($ORIGIN)")
 
 

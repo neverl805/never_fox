@@ -39,7 +39,13 @@ cd "$REPO"
 # 3) compile + vendor against the from-source NSS (self-consistent) + conda brotli/zstd
 echo "=== build.py ==="; python native/build.py
 echo "=== bundle.py ==="; python native/bundle.py
-for so in native/vendor/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true; done
+# DT_RPATH (not RUNPATH): RUNPATH is ignored for dlopen'd bare names, and NSS
+# dlopens libsoftokn3/libfreebl3 by bare soname. --force-rpath makes $ORIGIN apply
+# to those dlopens so the PKCS#11 crypto modules load from vendor/.
+for so in native/vendor/*.so*; do
+  patchelf --force-rpath --set-rpath '$ORIGIN' "$so" 2>/dev/null || true
+done
+patchelf --force-rpath --set-rpath '$ORIGIN/vendor:$ORIGIN' native/libfxtls.so 2>/dev/null || true
 echo "--- from-source NSS version (must be recent, has MLKEM/ECH) ---"
 strings "$(find "$FXTLS_NSS_DIST" -name libnssutil3.so | head -1)" 2>/dev/null \
   | grep -oE 'Network Security Services [0-9.]+' | head -1 || true
