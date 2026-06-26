@@ -88,8 +88,18 @@ jobs:
         run: |
           python -m pip wheel . --no-deps -w dist
           python -m pip install (Get-Item dist/*.whl).FullName
+          $code = @"
+          import os, never_fox
+          from never_fox import _native as n
+          L = os.path.join(os.path.dirname(never_fox.__file__), '_lib')
+          print('VENDOR:', sorted(os.listdir(os.path.join(L, 'vendor'))))
+          print('nss_ok=', n._lib.fxtls_nss_ok(), 'have_roots=', n._lib.fxtls_have_roots())
+          assert n._lib.fxtls_nss_ok() == 1, 'NSS init failed'
+          assert n._lib.fxtls_have_roots() == 1, 'roots failed'
+          print('smoke OK')
+          "@
           cd $env:RUNNER_TEMP
-          python -c "import never_fox; from never_fox import _native; r=_native._lib.fxtls_have_roots(); print('have_roots=', r); assert r==1, 'NSS roots failed'; print('wheel OK')"
+          $code | python -
 
       - name: upload wheel
         uses: actions/upload-artifact@v4

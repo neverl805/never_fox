@@ -9,10 +9,11 @@ _CANDS = [os.path.join(_HERE, "_lib"),                                  # instal
 _NATIVE = next((d for d in _CANDS if os.path.exists(os.path.join(d, _LIBNAME))), _CANDS[0])
 _LIBPATH = os.path.join(_NATIVE, _LIBNAME)
 if os.name == "nt":                              # let the loader find bundled NSS DLLs
-    for _d in (_NATIVE, os.path.join(_NATIVE, "vendor")):
+    for _d in (os.path.join(_NATIVE, "vendor"), _NATIVE):
         if os.path.isdir(_d):
             try: os.add_dll_directory(_d)
             except (AttributeError, OSError): pass
+            os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
 _lib = ctypes.CDLL(_LIBPATH)
 _lib.fxtls_connect.restype  = ctypes.c_void_p
 _lib.fxtls_connect.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
@@ -26,6 +27,7 @@ _lib.fxtls_have_roots.restype = ctypes.c_int
 _lib.fxtls_last_error.restype = ctypes.c_int
 _lib.fxtls_last_error_name.restype = ctypes.c_char_p
 _lib.fxtls_last_stage.restype = ctypes.c_char_p
+_lib.fxtls_nss_ok.restype = ctypes.c_int
 _lib.fxtls_alpn.argtypes    = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _lib.fxtls_write.argtypes   = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _lib.fxtls_read.argtypes    = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]

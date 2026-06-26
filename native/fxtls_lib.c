@@ -43,6 +43,7 @@ static int g_init = 0;
 static int g_roots = 0;   /* 1 once Mozilla roots are loaded */
 static int g_last_err = 0;   /* last NSPR/NSS error on a failed connect/handshake */
 static const char *g_last_stage = "ok";   /* which stage failed */
+static int g_nss_ok = 0;   /* 1 once NSS_NoDB_Init (softokn/freebl) succeeds */
 
 /* permissive hook used only when verify == 0 (like `curl -k`) */
 static SECStatus fxtls__accept(void *arg, PRFileDesc *fd, PRBool cs, PRBool srv) {
@@ -118,11 +119,13 @@ static void fxtls__ensure_init(void) {
     static char nss_policy[] = "NSS_IGNORE_SYSTEM_POLICY=1";
     putenv(nss_policy);
     PR_Init(PR_USER_THREAD, PR_PRIORITY_NORMAL, 0);
-    NSS_NoDB_Init(".");
+    g_nss_ok = (NSS_NoDB_Init(".") == SECSuccess);   /* loads softokn/freebl */
     NSS_SetDomesticPolicy();
     fxtls__load_roots();
     g_init = 1;
 }
+
+int fxtls_nss_ok(void) { fxtls__ensure_init(); return g_nss_ok; }
 
 /* run the Firefox-152 TLS handshake to `host` on an already-connected TCP socket
  * and wrap it in a context. Closes `tcp` and returns NULL on failure. */
