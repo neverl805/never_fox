@@ -60,6 +60,17 @@ def _capture():
             stage = (nat._lib.fxtls_last_stage() or b"").decode()
             roots = nat._lib.fxtls_have_roots()
             print(f"  failed at stage: {stage} | NSS error: {code} ({name}) | have_roots={roots}")
+            try:                                         # which NSS libs are actually loaded?
+                paths = set()
+                for ln in open("/proc/self/maps"):
+                    p = ln.split()[-1] if len(ln.split()) >= 6 else ""
+                    if any(t in p for t in ("libssl3", "libnss3", "libnssutil3",
+                                            "libsoftokn3", "libfreebl3", "libnspr4")):
+                        paths.add(p)
+                for p in sorted(paths):
+                    print(f"    loaded: {p}")
+            except OSError:
+                pass
         except Exception as e:
             print(f"  (could not read NSS error: {e!r})")
         sys.exit(f"FAIL: engine produced no ClientHello (Transport error: {err!r})")
