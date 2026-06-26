@@ -54,5 +54,12 @@ if [ ! -f native/vendor/libmozsqlite3.so ]; then
 fi
 echo "  swapped $swapped Firefox libs into native/vendor/"
 
+# Firefox's libs rely on the launcher's LD_LIBRARY_PATH, not $ORIGIN — re-rpath
+# every vendored lib to $ORIGIN so they resolve each other inside vendor/.
+for so in native/vendor/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true; done
+echo "--- vendor/ NSS libs ---"; ls native/vendor/ | grep -iE 'mozsqlite|softokn|freebl|nss|ssl|nspr|plc|plds' || true
+echo "--- libfxtls.so unresolved deps (should be none) ---"
+LD_LIBRARY_PATH="$PWD/native/vendor:${LD_LIBRARY_PATH:-}" ldd native/libfxtls.so 2>&1 | grep -i 'not found' || echo "  (all resolved)"
+
 # 4) verify — running here proves both glibc-2.17 compatibility AND the FF152 fingerprint
 echo "=== verify.py ==="; python native/verify.py
