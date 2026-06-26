@@ -1,65 +1,48 @@
 #!/bin/bash
 # Broad-compat Linux engine (CentOS 7+, glibc 2.17). Runs inside a manylinux2014
-# container. Trick: compile/link against conda-forge NSS (built for glibc 2.17,
-# gives us the headers + link symbols incl. the MLKEM enum), then vendor Firefox
-# 152's OWN NSS libraries (full X25519MLKEM768 + cert compression, also built by
-# Mozilla against an old glibc) for the runtime so the ClientHello is byte-perfect.
+# container. Builds NSS + NSPR FROM SOURCE with the container's old-glibc toolchain,
+# so headers, link libs and runtime libs are one self-consistent version (no ABI
+# skew) and everything links against glibc 2.17. brotli/zstd come from conda-forge
+# (also built for glibc 2.17). Any recent NSS + our config => byte-perfect FF152
+# (verify.py asserts it); running here also proves the glibc-2.17 floor.
 set -euo pipefail
 
+REPO="$PWD"                       # /io (mounted repo); we cd away to build NSS
 ARCH=$(uname -m)
-FF_VER="${FF_VER:-152.0.2}"
-case "$ARCH" in
-  x86_64)  FF_PLAT=linux-x86_64;  MF=x86_64 ;;
-  aarch64) FF_PLAT=linux-aarch64; MF=aarch64 ;;
-  *) echo "unsupported arch $ARCH"; exit 1 ;;
-esac
-echo "=== arch=$ARCH  firefox=$FF_VER ($FF_PLAT) ==="
+echo "=== manylinux2014 build, arch=$ARCH ==="
 
-# 1) conda-forge toolchain (glibc 2.17 compatible): NSS/NSPR headers + symbols,
-#    brotli, zstd, a clean python, pkg-config, patchelf.
+# 1) conda-forge toolchain libs (glibc 2.17): brotli, zstd, python, pkg-config,
+#    patchelf, plus gyp + ninja for the NSS build.
+case "$ARCH" in x86_64) MF=x86_64 ;; aarch64) MF=aarch64 ;; *) echo "bad arch"; exit 1 ;; esac
 if [ ! -x /opt/conda/bin/conda ]; then
   curl -fsSL "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${MF}.sh" -o /tmp/mf.sh
   bash /tmp/mf.sh -b -p /opt/conda
 fi
 /opt/conda/bin/conda create -y -n fx -c conda-forge \
-  python=3.10 nss nspr brotli zstd sqlite pkg-config patchelf
+  python=3.10 brotli zstd zlib pkg-config patchelf ninja
 PFX=/opt/conda/envs/fx
 export PATH="$PFX/bin:$PATH"
 export PKG_CONFIG_PATH="$PFX/lib/pkgconfig"
+python -m pip install -q gyp-next
 
-# 2) compile + vendor against conda (symbols resolve; brotli/zstd are real)
+# 2) NSS + NSPR from source (sibling checkouts; build.sh builds both -> ../dist)
+echo "=== clone + build NSS/NSPR from source ==="
+W=/tmp/nssbuild; rm -rf "$W"; mkdir -p "$W"; cd "$W"
+git clone --depth 1 https://github.com/nss-dev/nspr.git
+git clone --depth 1 https://github.com/nss-dev/nss.git
+( cd nss && ./build.sh --opt --disable-tests )
+export FXTLS_NSS_DIST="$W/dist"
+echo "--- NSS dist layout ---"
+find "$W/dist" -name 'ssl.h' -o -name 'libssl3.so' 2>/dev/null | head
+cd "$REPO"
+
+# 3) compile + vendor against the from-source NSS (self-consistent) + conda brotli/zstd
 echo "=== build.py ==="; python native/build.py
 echo "=== bundle.py ==="; python native/bundle.py
-
-# 3) swap the vendored NSS/NSPR for Firefox 152's own libraries (full MLKEM).
-#    Copy ALL of Firefox's .so (except the huge libxul + irrelevant media/UI libs)
-#    so every transitive NSS dep (libmozsqlite3 for softokn, etc.) comes along.
-#    Firefox's libs carry RUNPATH=$ORIGIN, so they find each other inside vendor/.
-echo "=== fetch Firefox $FF_VER NSS ==="
-curl -fsSL "https://ftp.mozilla.org/pub/firefox/releases/${FF_VER}/${FF_PLAT}/en-US/firefox-${FF_VER}.tar.xz" -o /tmp/ff.tar.xz
-mkdir -p /tmp/ff && tar -xf /tmp/ff.tar.xz -C /tmp/ff
-echo "--- Firefox ships these .so: ---"; ls -la /tmp/ff/firefox/*.so 2>/dev/null
-swapped=0
-for so in /tmp/ff/firefox/*.so; do
-  base=$(basename "$so")
-  case "$base" in
-    libxul.so|libmozavcodec.so|libmozavutil.so|libmozgtk.so|libmozwayland.so|libgkcodecs.so) continue ;;
-  esac
-  cp -f "$so" native/vendor/ && swapped=$((swapped+1))
-done
-# insurance: if Firefox didn't ship libmozsqlite3, satisfy softokn's NEEDED with conda sqlite
-if [ ! -f native/vendor/libmozsqlite3.so ]; then
-  sq=$(ls "$PFX"/lib/libsqlite3.so* 2>/dev/null | head -1)
-  [ -n "$sq" ] && cp -fL "$sq" native/vendor/libmozsqlite3.so && echo "  (fallback: conda sqlite -> libmozsqlite3.so)"
-fi
-echo "  swapped $swapped Firefox libs into native/vendor/"
-
-# Firefox's libs rely on the launcher's LD_LIBRARY_PATH, not $ORIGIN — re-rpath
-# every vendored lib to $ORIGIN so they resolve each other inside vendor/.
 for so in native/vendor/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true; done
-echo "--- vendor/ NSS libs ---"; ls native/vendor/ | grep -iE 'mozsqlite|softokn|freebl|nss|ssl|nspr|plc|plds' || true
-echo "--- libfxtls.so unresolved deps (should be none) ---"
+echo "--- vendor/ ---"; ls native/vendor/ | grep -iE 'nss|ssl|smime|softokn|freebl|nspr|plc|plds|brotli|zstd' || true
+echo "--- unresolved deps ---"
 LD_LIBRARY_PATH="$PWD/native/vendor:${LD_LIBRARY_PATH:-}" ldd native/libfxtls.so 2>&1 | grep -i 'not found' || echo "  (all resolved)"
 
-# 4) verify — running here proves both glibc-2.17 compatibility AND the FF152 fingerprint
+# 4) verify — proves glibc-2.17 compatibility AND the FF152 fingerprint
 echo "=== verify.py ==="; python native/verify.py

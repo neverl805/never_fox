@@ -32,8 +32,12 @@ def pkg(mod, *flags):
 def main():
     cc = os.environ.get("CC") or ("clang" if PLAT == "darwin" else "gcc" if IS_WIN else "cc")
 
-    cflags = pkg("nss", "--cflags") or _fallback_cflags()
-    libs = pkg("nss", "--libs") or _fallback_libs()
+    dist = os.environ.get("FXTLS_NSS_DIST")          # built-from-source NSS (self-consistent)
+    if dist:
+        cflags, libs = _nss_from_dist(dist)
+    else:
+        cflags = pkg("nss", "--cflags") or _fallback_cflags()
+        libs = pkg("nss", "--libs") or _fallback_libs()
     # brotli + zstd (+ system zlib)
     for mod, brew, lflag in (("libbrotlidec", "brotli", "-lbrotlidec"),
                              ("libzstd", "zstd", "-lzstd")):
@@ -72,6 +76,27 @@ def main():
 
 def _libdirs(libs):
     return [f[2:] for f in libs if f.startswith("-L")]
+
+
+def nss_lib_dir(dist):
+    """Find the dir under a from-source NSS dist that holds libssl3.so."""
+    for root, _dirs, files in os.walk(dist):
+        if any(f.startswith("libssl3.so") for f in files):
+            return root
+    return os.path.join(dist, "lib")
+
+
+def _nss_from_dist(dist):
+    incs = set()
+    for root, _dirs, files in os.walk(dist):
+        if {"ssl.h", "prinit.h", "nss.h"} & set(files):
+            incs.add(root)
+    libdir = nss_lib_dir(dist)
+    cflags = ["-I" + d for d in sorted(incs)]
+    # link only the core libs; softokn/freebl/ckbi are dlopen'd by NSS at runtime
+    libs = ["-L" + libdir, "-lssl3", "-lsmime3", "-lnss3", "-lnssutil3",
+            "-lnspr4", "-lplc4", "-lplds4"]
+    return cflags, libs
 
 
 def _brew_prefix(name):

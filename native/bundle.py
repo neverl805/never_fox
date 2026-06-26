@@ -96,6 +96,11 @@ def _bundle_windows():
 
 def _lib_dirs():
     dirs = set()
+    dist = os.environ.get("FXTLS_NSS_DIST")          # built-from-source NSS
+    if dist:
+        for root, _d, files in os.walk(dist):
+            if any(f.startswith("libnss3.so") for f in files):
+                dirs.add(root)
     for mod in ("nss", "nspr", "libbrotlidec", "libzstd"):
         d = pkg_libdir(mod)
         if d and os.path.isdir(d):
