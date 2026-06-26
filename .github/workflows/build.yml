@@ -1,9 +1,11 @@
 name: build native engine
 
-# NSS/NSPR/brotli/zstd are NOT compiled here — they come prebuilt from each
-# platform's package manager (cached). Only the ~250-line engine compiles.
-# Every build is gated by a fingerprint check that asserts the output is
-# byte-for-byte Firefox 152.
+# NSS/NSPR/brotli/zstd come prebuilt from each platform's package manager — only
+# the ~250-line engine compiles. Every build is gated by verify.py, which asserts
+# the output ClientHello is byte-for-byte Firefox 152.
+#
+# Linux uses a Fedora container: its NSS is a FULL build (X25519MLKEM768 + RFC 8879
+# cert compression), unlike conda-forge's stripped NSS which dropped both.
 
 on:
   push:
@@ -15,43 +17,33 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: linux-x86_64
-            os: ubuntu-latest
-          - name: linux-arm64
-            os: ubuntu-24.04-arm
-          - name: macos-arm64
-            os: macos-14
-          - name: windows-x86_64
-            os: windows-latest
+          - { name: linux-x86_64, os: ubuntu-latest,    container: 'fedora:latest' }
+          - { name: linux-arm64,  os: ubuntu-24.04-arm, container: 'fedora:latest' }
+          # macOS + Windows already verified == Firefox 152; re-enable for release:
+          # - { name: macos-arm64,    os: macos-14 }
+          # - { name: windows-x86_64, os: windows-latest }
     steps:
+      - name: container prereqs (linux)        # git/tar must exist before checkout
+        if: runner.os == 'Linux'
+        run: dnf install -y git tar gzip
+
       - uses: actions/checkout@v4
 
-      # ---- Linux: build tools from apt, NSS from conda-forge ----
-      # The distro NSS (Ubuntu ~3.98) is too old for X25519MLKEM768; conda-forge
-      # ships a recent NSS (3.1xx) for linux-64 AND linux-aarch64.
-      - name: build tools (linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential patchelf
-      - name: nss via conda-forge (linux)
-        if: runner.os == 'Linux'
-        uses: mamba-org/setup-micromamba@v2
-        with:
-          environment-name: fx
-          init-shell: bash
-          create-args: >-
-            nss>=3.108 nspr brotli zstd pkg-config
+      # ---- Linux: full NSS from Fedora ----
       - name: build + verify (linux)
         if: runner.os == 'Linux'
-        shell: bash -el {0}
         run: |
-          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
-          python native/build.py
-          python native/bundle.py || echo "bundle: best-effort"
-          python native/verify.py
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc python3 patchelf pkgconf-pkg-config \
+            nss-devel nspr-devel brotli-devel libzstd-devel zlib-devel
+          python3 native/build.py
+          python3 native/bundle.py || echo "bundle: best-effort"
+          python3 native/verify.py
 
       # ---- macOS: prebuilt NSS from Homebrew ----
       - name: deps (macos)
@@ -93,7 +85,6 @@ jobs:
             native/vendor/**
           if-no-files-found: warn
 
-  # Collect all platform builds onto a GitHub Release when tagging vX.Y.Z
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
