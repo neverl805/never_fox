@@ -46,5 +46,14 @@ strings "$(find "$FXTLS_NSS_DIST" -name libnssutil3.so | head -1)" 2>/dev/null \
 echo "--- libfxtls.so NSS resolution (rpath only, must point into vendor/) ---"
 ldd native/libfxtls.so 2>&1 | grep -iE 'libnss3|libssl3|libnspr4|not found' || true
 
+# NSS init sanity — isolate "NSS_NoDB_Init failed" from "handshake failed"
+echo "--- NSS init sanity (have_roots triggers NSS_NoDB_Init + loads softokn) ---"
+python - <<'PY' || echo "  >>> NSS init FAILED"
+import importlib.util
+spec = importlib.util.spec_from_file_location("_n", "never_fox/_native.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print("  _native loaded; fxtls_have_roots() =", m._lib.fxtls_have_roots())
+PY
+
 # 4) verify — proves glibc-2.17 compatibility AND the FF152 fingerprint
 echo "=== verify.py ==="; python native/verify.py

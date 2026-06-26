@@ -47,13 +47,14 @@ def _capture():
     spec = importlib.util.spec_from_file_location(
         "_fxtls_native", os.path.join(ROOT, "never_fox", "_native.py"))
     nat = importlib.util.module_from_spec(spec); spec.loader.exec_module(nat)
+    err = None
     try:
         nat.Transport("localhost", port, 6, verify=False)
-    except Exception:
-        pass
+    except Exception as e:
+        err = e                                          # normal (sink closes) OR a real init failure
     sink.wait(timeout=20)
     if not os.path.exists(out):
-        sys.exit("FAIL: engine produced no ClientHello")
+        sys.exit(f"FAIL: engine produced no ClientHello (Transport error: {err!r})")
     p = json.load(open(out)); os.remove(out)
     return p
 
