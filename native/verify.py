@@ -54,6 +54,13 @@ def _capture():
         err = e                                          # normal (sink closes) OR a real init failure
     sink.wait(timeout=20)
     if not os.path.exists(out):
+        try:
+            code = nat._lib.fxtls_last_error()
+            name = (nat._lib.fxtls_last_error_name() or b"").decode()
+            roots = nat._lib.fxtls_have_roots()
+            print(f"  NSS last error: {code} ({name}) | have_roots={roots}")
+        except Exception as e:
+            print(f"  (could not read NSS error: {e!r})")
         sys.exit(f"FAIL: engine produced no ClientHello (Transport error: {err!r})")
     p = json.load(open(out)); os.remove(out)
     return p

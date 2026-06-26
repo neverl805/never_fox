@@ -41,6 +41,7 @@ typedef struct { PRFileDesc *fd; char alpn[24]; } fxtls_ctx;
 
 static int g_init = 0;
 static int g_roots = 0;   /* 1 once Mozilla roots are loaded */
+static int g_last_err = 0;   /* last NSPR/NSS error on a failed connect/handshake */
 
 /* permissive hook used only when verify == 0 (like `curl -k`) */
 static SECStatus fxtls__accept(void *arg, PRFileDesc *fd, PRBool cs, PRBool srv) {
@@ -118,15 +119,15 @@ static void fxtls__ensure_init(void) {
 static fxtls_ctx *fxtls__finish(PRFileDesc *tcp, const char *host, int verify) {
     PRFileDesc *s = SSL_ImportFD(NULL, tcp);
     if (!s) { PR_Close(tcp); return NULL; }
-    if (fxtls_configure(s, 100) != SECSuccess) { PR_Close(s); return NULL; }
+    if (fxtls_configure(s, 100) != SECSuccess) { g_last_err = PR_GetError(); PR_Close(s); return NULL; }
     SSL_SetURL(s, host);
     if (verify) SSL_AuthCertificateHook(s, SSL_AuthCertificate, CERT_GetDefaultCertDB());
     else        SSL_AuthCertificateHook(s, fxtls__accept, NULL);
     SSL_ResetHandshake(s, PR_FALSE);
     if (SSL_ForceHandshake(s) != SECSuccess) {
+        g_last_err = PR_GetError();
         if (getenv("FXTLS_DEBUG"))
-            fprintf(stderr, "fxtls handshake err %d (%s)\n",
-                    PR_GetError(), PR_ErrorToName(PR_GetError()));
+            fprintf(stderr, "fxtls handshake err %d (%s)\n", g_last_err, PR_ErrorToName(g_last_err));
         PR_Close(s); return NULL;
     }
     fxtls_ctx *c = (fxtls_ctx *)calloc(1, sizeof(*c));
@@ -156,8 +157,12 @@ static PRFileDesc *fxtls__tcp(const char *host, int port, int to) {
 fxtls_ctx *fxtls_connect(const char *host, int port, int timeout_s, int verify) {
     fxtls__ensure_init();
     PRFileDesc *tcp = fxtls__tcp(host, port, timeout_s > 0 ? timeout_s : 15);
-    return tcp ? fxtls__finish(tcp, host, verify) : NULL;
+    if (!tcp) { g_last_err = PR_GetError(); return NULL; }
+    return fxtls__finish(tcp, host, verify);
 }
+
+int fxtls_last_error(void) { return g_last_err; }
+const char *fxtls_last_error_name(void) { return PR_ErrorToName(g_last_err); }
 
 /* connect through an HTTP CONNECT proxy: TCP to proxy, CONNECT to the target,
  * then the Firefox-152 TLS handshake runs end-to-end to the target (the proxy
