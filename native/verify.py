@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""CI fingerprint gate: build a ClientHello with the freshly-built engine and
-assert it is byte-for-byte Firefox 152. Exits non-zero on any drift (e.g. a
-platform's NSS version produces different bytes), so CI fails loudly.
+"""CI fingerprint gate — exhaustive low-level handshake check.
 
-Cross-platform: uses the local ClientHello sink + the native engine, all Python.
+Builds a ClientHello with the freshly-built engine and compares it to the
+authoritative Firefox 152 reference (native/firefox152_reference.json), field by
+field AND byte for byte (random / session_id / key_share keys / ECH payload
+masked, since those are legitimately per-connection). Any drift fails CI loudly.
 """
 import os, sys, json, socket, subprocess, time
 
@@ -12,11 +13,13 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "harness"))
 
-EXPECT = {
-    "ja3": "6447ab086255d194909d4013b1a89e87",
-    "ja4": "t13d1617h2_86a278354501_3cbfd9057e0d",
-    "ech_len": 281,
-}
+REF = json.load(open(os.path.join(HERE, "firefox152_reference.json")))
+
+# field-by-field assertions over the whole ClientHello
+FIELDS = ["ja3", "ja3_nogrease", "ja4", "legacy_version", "session_id_len",
+          "cipher_suites", "extensions", "supported_groups", "key_share_groups",
+          "signature_algorithms", "supported_versions", "ec_point_formats", "alpn",
+          "psk_key_exchange_modes", "record_size_limit", "cert_compression_algs", "ech_len"]
 
 
 def _wait_port(port, deadline=8):
@@ -30,7 +33,7 @@ def _wait_port(port, deadline=8):
     return False
 
 
-def main():
+def _capture():
     port = int(os.environ.get("FXTLS_VERIFY_PORT", "8479"))
     out = os.path.join(HERE, "_verify_ch.json")
     if os.path.exists(out):
@@ -40,51 +43,63 @@ def main():
                              "--count", "1", "--timeout", "15"])
     if not _wait_port(port):
         sink.terminate(); sys.exit("sink did not open")
-
-    # load the ctypes binding directly (no package __init__ -> no hpack/etc. needed)
-    import importlib.util
+    import importlib.util                              # load _native without the package (no hpack)
     spec = importlib.util.spec_from_file_location(
         "_fxtls_native", os.path.join(ROOT, "never_fox", "_native.py"))
-    _native = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(_native)
+    nat = importlib.util.module_from_spec(spec); spec.loader.exec_module(nat)
     try:
-        _native.Transport("localhost", port, 6, verify=False)   # sends the ClientHello
+        nat.Transport("localhost", port, 6, verify=False)
     except Exception:
-        pass                                                    # sink closes -> handshake error, expected
+        pass
     sink.wait(timeout=20)
-
     if not os.path.exists(out):
         sys.exit("FAIL: engine produced no ClientHello")
-    p = json.load(open(out))
-    from hello_sink import parse_client_hello
+    p = json.load(open(out)); os.remove(out)
+    return p
+
+
+def main():
+    p = _capture()
+    from hello_sink import parse_client_hello, normalized_hex
     rp = parse_client_hello(bytes.fromhex(p["raw_hex"]))
-    ech = rp["_offsets"].get("ech", [])
-    got = {"ja3": p["ja3"], "ja4": p["ja4"], "ech_len": (ech[0][1] if ech else None)}
-    os.remove(out)
-
+    d = rp["details"]
+    got = {
+        "ja3": rp["ja3"], "ja3_nogrease": rp["ja3_nogrease"], "ja4": rp["ja4"],
+        "legacy_version": rp["legacy_version"],
+        "session_id_len": rp["_offsets"]["session_id"][1],
+        "cipher_suites": rp["cipher_suites"], "extensions": rp["extensions"],
+        "supported_groups": d.get("supported_groups"),
+        "key_share_groups": d.get("key_share_groups"),
+        "signature_algorithms": d.get("signature_algorithms"),
+        "supported_versions": d.get("supported_versions"),
+        "ec_point_formats": d.get("ec_point_formats"), "alpn": d.get("alpn"),
+        "psk_key_exchange_modes": d.get("psk_key_exchange_modes"),
+        "record_size_limit": d.get("record_size_limit"),
+        "cert_compression_algs": d.get("cert_compression_algs"),
+        "ech_len": rp["_offsets"]["ech"][0][1] if rp["_offsets"].get("ech") else None,
+    }
     ok = True
-    for k, exp in EXPECT.items():
-        mark = "OK" if got[k] == exp else "MISMATCH"
-        if got[k] != exp:
-            ok = False
-        print(f"  {k:8} = {got[k]}   (expect {exp})  [{mark}]")
+    print("== ClientHello field-by-field vs Firefox 152 ==")
+    for f in FIELDS:
+        match = REF.get(f) == got.get(f)
+        ok &= match
+        print(f"  [{'OK' if match else 'FAIL'}] {f}")
+        if not match:
+            print(f"        expect: {REF.get(f)}")
+            print(f"        got   : {got.get(f)}")
 
-    if not ok:
-        d = rp["details"]
-        print("  --- this platform's ClientHello (for diagnosis) ---")
-        print("  bytes    :", len(rp["raw_hex"]) // 2, "(Firefox 152 = 1887)")
-        print("  ext count:", len(rp["extensions"]), "(FF152 = 17)")
-        print("  ext      :", [hex(e) for e in rp["extensions"]])
-        print("  groups   :", [hex(g) for g in d.get("supported_groups", [])],
-              "(FF152: 0x11ec MLKEM, 0x1d, 0x17, 0x18, 0x19, 0x100, 0x101)")
-        print("  key_share:", [hex(g) for g in d.get("key_share_groups", [])],
-              "(FF152: 0x11ec, 0x1d, 0x17)")
-        print("  -> 0x11ec (X25519MLKEM768) present in groups:",
-              0x11ec in d.get("supported_groups", []),
-              "| in key_share:", 0x11ec in d.get("key_share_groups", []))
+    print("== structural bytes (random/session_id/key_share/ECH masked) ==")
+    a, b = REF["normalized_hex"], normalized_hex(rp)
+    nb = a == b
+    ok &= nb
+    print(f"  [{'OK' if nb else 'FAIL'}] normalized ClientHello: {len(b)//2}B (FF152 {len(a)//2}B)")
+    if not nb:
+        i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
+        lo = max(0, i - 8)
+        print(f"        first diff at byte {i//2}: ff…{a[lo:i+16]}  got…{b[lo:i+16]}")
 
-    print("\nPASS: engine fingerprint == Firefox 152" if ok
-          else "\nFAIL: fingerprint drift -- this platform's NSS does not match Firefox 152")
+    print("\nPASS: engine ClientHello == Firefox 152 (all fields + structural bytes)" if ok
+          else "\nFAIL: handshake drift -- this platform's NSS does not match Firefox 152")
     sys.exit(0 if ok else 1)
 
 

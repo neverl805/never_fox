@@ -22,11 +22,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x86_64, os: ubuntu-latest,    container: 'fedora:latest' }
-          - { name: linux-arm64,  os: ubuntu-24.04-arm, container: 'fedora:latest' }
-          # macOS + Windows already verified == Firefox 152; re-enable for release:
-          # - { name: macos-arm64,    os: macos-14 }
-          # - { name: windows-x86_64, os: windows-latest }
+          - { name: linux-x86_64,   os: ubuntu-latest,    container: 'fedora:latest' }
+          - { name: linux-arm64,    os: ubuntu-24.04-arm, container: 'fedora:latest' }
+          - { name: macos-arm64,    os: macos-14 }
+          - { name: windows-x86_64, os: windows-latest }
     steps:
       - name: container prereqs (linux)        # git/tar must exist before checkout
         if: runner.os == 'Linux'
