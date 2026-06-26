@@ -68,6 +68,21 @@ def main():
         if got[k] != exp:
             ok = False
         print(f"  {k:8} = {got[k]}   (expect {exp})  [{mark}]")
+
+    if not ok:
+        d = rp["details"]
+        print("  --- this platform's ClientHello (for diagnosis) ---")
+        print("  bytes    :", len(rp["raw_hex"]) // 2, "(Firefox 152 = 1887)")
+        print("  ext count:", len(rp["extensions"]), "(FF152 = 17)")
+        print("  ext      :", [hex(e) for e in rp["extensions"]])
+        print("  groups   :", [hex(g) for g in d.get("supported_groups", [])],
+              "(FF152: 0x11ec MLKEM, 0x1d, 0x17, 0x18, 0x19, 0x100, 0x101)")
+        print("  key_share:", [hex(g) for g in d.get("key_share_groups", [])],
+              "(FF152: 0x11ec, 0x1d, 0x17)")
+        print("  -> 0x11ec (X25519MLKEM768) present in groups:",
+              0x11ec in d.get("supported_groups", []),
+              "| in key_share:", 0x11ec in d.get("key_share_groups", []))
+
     print("\nPASS: engine fingerprint == Firefox 152" if ok
           else "\nFAIL: fingerprint drift -- this platform's NSS does not match Firefox 152")
     sys.exit(0 if ok else 1)
