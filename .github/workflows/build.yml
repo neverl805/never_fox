@@ -10,7 +10,7 @@ name: build native engine
 on:
   push:
     branches: [main]
-    paths: ["native/**", ".github/workflows/build.yml"]
+    tags: ["v*"]            # v* tags trigger build + the release job
   workflow_dispatch:
 
 jobs:
