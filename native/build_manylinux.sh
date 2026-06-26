@@ -22,7 +22,7 @@ if [ ! -x /opt/conda/bin/conda ]; then
   bash /tmp/mf.sh -b -p /opt/conda
 fi
 /opt/conda/bin/conda create -y -n fx -c conda-forge \
-  python=3.10 nss nspr brotli zstd pkg-config patchelf
+  python=3.10 nss nspr brotli zstd sqlite pkg-config patchelf
 PFX=/opt/conda/envs/fx
 export PATH="$PFX/bin:$PATH"
 export PKG_CONFIG_PATH="$PFX/lib/pkgconfig"
@@ -31,18 +31,28 @@ export PKG_CONFIG_PATH="$PFX/lib/pkgconfig"
 echo "=== build.py ==="; python native/build.py
 echo "=== bundle.py ==="; python native/bundle.py
 
-# 3) swap the vendored NSS/NSPR for Firefox 152's own libraries (full MLKEM)
+# 3) swap the vendored NSS/NSPR for Firefox 152's own libraries (full MLKEM).
+#    Copy ALL of Firefox's .so (except the huge libxul + irrelevant media/UI libs)
+#    so every transitive NSS dep (libmozsqlite3 for softokn, etc.) comes along.
+#    Firefox's libs carry RUNPATH=$ORIGIN, so they find each other inside vendor/.
 echo "=== fetch Firefox $FF_VER NSS ==="
 curl -fsSL "https://ftp.mozilla.org/pub/firefox/releases/${FF_VER}/${FF_PLAT}/en-US/firefox-${FF_VER}.tar.xz" -o /tmp/ff.tar.xz
 mkdir -p /tmp/ff && tar -xf /tmp/ff.tar.xz -C /tmp/ff
+echo "--- Firefox ships these .so: ---"; ls -la /tmp/ff/firefox/*.so 2>/dev/null
 swapped=0
-for l in libnss3 libnssutil3 libssl3 libsmime3 libsoftokn3 libfreebl3 libfreeblpriv3 \
-         libnssckbi libnssdbm3 libnspr4 libplc4 libplds4 libmozsqlite3 libnssckbi; do
-  if [ -f "/tmp/ff/firefox/$l.so" ]; then
-    cp -f "/tmp/ff/firefox/$l.so" native/vendor/ && swapped=$((swapped+1))
-  fi
+for so in /tmp/ff/firefox/*.so; do
+  base=$(basename "$so")
+  case "$base" in
+    libxul.so|libmozavcodec.so|libmozavutil.so|libmozgtk.so|libmozwayland.so|libgkcodecs.so) continue ;;
+  esac
+  cp -f "$so" native/vendor/ && swapped=$((swapped+1))
 done
-echo "  swapped $swapped Firefox NSS/NSPR libs into native/vendor/"
+# insurance: if Firefox didn't ship libmozsqlite3, satisfy softokn's NEEDED with conda sqlite
+if [ ! -f native/vendor/libmozsqlite3.so ]; then
+  sq=$(ls "$PFX"/lib/libsqlite3.so* 2>/dev/null | head -1)
+  [ -n "$sq" ] && cp -fL "$sq" native/vendor/libmozsqlite3.so && echo "  (fallback: conda sqlite -> libmozsqlite3.so)"
+fi
+echo "  swapped $swapped Firefox libs into native/vendor/"
 
 # 4) verify — running here proves both glibc-2.17 compatibility AND the FF152 fingerprint
 echo "=== verify.py ==="; python native/verify.py
