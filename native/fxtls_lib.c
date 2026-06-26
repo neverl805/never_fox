@@ -75,20 +75,29 @@ static void fxtls__self_dir(char *out, size_t n) {
 static void fxtls__load_roots(void) {
     char dir[1024], path[1200];
     const char *env = getenv("FXTLS_CA_MODULE");
-    const char *cands[8]; int nc = 0;
+    const char *cands[16]; int nc = 0;
     if (env) cands[nc++] = env;
     fxtls__self_dir(dir, sizeof(dir));
-    static char p1[1200], p2[1200];
-    if (dir[0]) {
-        snprintf(p1, sizeof(p1), "%s/vendor/%s", dir, FXTLS_CKBI); cands[nc++] = p1;
-        snprintf(p2, sizeof(p2), "%s/%s", dir, FXTLS_CKBI);        cands[nc++] = p2;
+    /* ckbi basename varies (MSYS2 mingw ships libnssckbi.dll, official Windows
+     * NSS ships nssckbi.dll) — try each next to the library and under vendor/. */
+#ifdef _WIN32
+    static const char *ckbi[] = { "libnssckbi.dll", "nssckbi.dll" };
+#elif defined(__APPLE__)
+    static const char *ckbi[] = { "libnssckbi.dylib" };
+#else
+    static const char *ckbi[] = { "libnssckbi.so" };
+#endif
+    static char buf[8][1200]; int bi = 0;
+    for (size_t i = 0; dir[0] && i < sizeof(ckbi)/sizeof(ckbi[0]) && bi < 7; i++) {
+        snprintf(buf[bi], 1200, "%s/vendor/%s", dir, ckbi[i]); cands[nc++] = buf[bi++];
+        snprintf(buf[bi], 1200, "%s/%s", dir, ckbi[i]);        cands[nc++] = buf[bi++];
     }
 #ifdef __APPLE__
-    cands[nc++] = "/opt/homebrew/opt/nss/lib/" FXTLS_CKBI;
+    cands[nc++] = "/opt/homebrew/opt/nss/lib/libnssckbi.dylib";
 #elif !defined(_WIN32)
-    cands[nc++] = "/usr/lib/x86_64-linux-gnu/nss/" FXTLS_CKBI;
-    cands[nc++] = "/usr/lib/aarch64-linux-gnu/nss/" FXTLS_CKBI;
-    cands[nc++] = "/usr/lib64/" FXTLS_CKBI;
+    cands[nc++] = "/usr/lib/x86_64-linux-gnu/nss/libnssckbi.so";
+    cands[nc++] = "/usr/lib/aarch64-linux-gnu/nss/libnssckbi.so";
+    cands[nc++] = "/usr/lib64/libnssckbi.so";
 #endif
     for (int i = 0; i < nc; i++) {
         if (access(cands[i], R_OK) != 0) continue;

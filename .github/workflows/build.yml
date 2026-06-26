@@ -53,9 +53,11 @@ jobs:
       - name: smoke test (macos)
         if: runner.os == 'macOS'
         run: |
-          python3 -m pip install dist/*.whl
+          python3 -m venv "$RUNNER_TEMP/venv"        # avoid PEP 668 (Homebrew python is externally managed)
+          "$RUNNER_TEMP/venv/bin/pip" install dist/*.whl
           cd "$RUNNER_TEMP"
-          python3 -c "import never_fox; from never_fox import _native; assert _native._lib.fxtls_have_roots()==1; print('wheel OK')"
+          "$RUNNER_TEMP/venv/bin/python" -c "import never_fox; from never_fox import _native; \
+          r=_native._lib.fxtls_have_roots(); print('have_roots=', r); assert r==1; print('wheel OK')"
 
       # ---- Windows: engine from MSYS2 (mingw), wheel from stock CPython ----
       - name: setup python (windows)            # stock CPython -> correct win_amd64 tag
@@ -87,7 +89,7 @@ jobs:
           python -m pip wheel . --no-deps -w dist
           python -m pip install (Get-Item dist/*.whl).FullName
           cd $env:RUNNER_TEMP
-          python -c "import never_fox; from never_fox import _native; assert _native._lib.fxtls_have_roots()==1; print('wheel OK')"
+          python -c "import never_fox; from never_fox import _native; r=_native._lib.fxtls_have_roots(); print('have_roots=', r); assert r==1, 'NSS roots failed'; print('wheel OK')"
 
       - name: upload wheel
         uses: actions/upload-artifact@v4
