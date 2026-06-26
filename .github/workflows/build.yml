@@ -17,28 +17,27 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # manylinux2014 (glibc 2.17) -> runs on CentOS 7+ and almost any Linux
-          - { name: linux-x86_64, os: ubuntu-latest,    container: 'quay.io/pypa/manylinux2014_x86_64' }
-          - { name: linux-arm64,  os: ubuntu-24.04-arm, container: 'quay.io/pypa/manylinux2014_aarch64' }
+          # manylinux2014 (glibc 2.17) -> runs on CentOS 7+ and almost any Linux.
+          # The job runs on the HOST (modern glibc, so checkout's Node works); the
+          # build itself happens inside the old-glibc container via `docker run`.
+          - { name: linux-x86_64, os: ubuntu-latest,    dockerimg: 'quay.io/pypa/manylinux2014_x86_64' }
+          - { name: linux-arm64,  os: ubuntu-24.04-arm, dockerimg: 'quay.io/pypa/manylinux2014_aarch64' }
           # macOS + Windows already verified == Firefox 152; re-enable for release:
           # - { name: macos-arm64,    os: macos-14 }
           # - { name: windows-x86_64, os: windows-latest }
     steps:
-      - name: container prereqs (linux)        # git/tar must exist before checkout
-        if: runner.os == 'Linux'
-        run: yum install -y git tar xz gzip || true
-
       - uses: actions/checkout@v4
 
-      # ---- Linux: conda NSS (glibc 2.17) to link + Firefox 152's NSS to run ----
+      # ---- Linux: build inside manylinux2014 (conda NSS to link + Firefox's NSS to run) ----
       - name: build + verify (linux, manylinux2014 / CentOS7+ compat)
         if: runner.os == 'Linux'
-        run: bash native/build_manylinux.sh
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io "${{ matrix.dockerimg }}" \
+            bash native/build_manylinux.sh
 
       # ---- macOS: prebuilt NSS from Homebrew ----
       - name: deps (macos)
