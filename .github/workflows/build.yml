@@ -30,20 +30,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---- Linux: prebuilt NSS from apt ----
-      - name: deps (linux)
+      # ---- Linux: build tools from apt, NSS from conda-forge ----
+      # The distro NSS (Ubuntu ~3.98) is too old for X25519MLKEM768; conda-forge
+      # ships a recent NSS (3.1xx) for linux-64 AND linux-aarch64.
+      - name: build tools (linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libnss3-dev libnspr4-dev libbrotli-dev libzstd-dev zlib1g-dev \
-            pkg-config patchelf
+        run: sudo apt-get update && sudo apt-get install -y build-essential patchelf
+      - name: nss via conda-forge (linux)
+        if: runner.os == 'Linux'
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: fx
+          init-shell: bash
+          create-args: >-
+            nss>=3.108 nspr brotli zstd pkg-config
       - name: build + verify (linux)
         if: runner.os == 'Linux'
+        shell: bash -el {0}
         run: |
-          python3 native/build.py
-          python3 native/bundle.py || echo "bundle: best-effort"
-          python3 native/verify.py
+          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+          python native/build.py
+          python native/bundle.py || echo "bundle: best-effort"
+          python native/verify.py
 
       # ---- macOS: prebuilt NSS from Homebrew ----
       - name: deps (macos)

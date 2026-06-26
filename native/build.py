@@ -30,7 +30,7 @@ def pkg(mod, *flags):
 
 
 def main():
-    cc = os.environ.get("CC") or ("clang" if PLAT == "darwin" else "cc")
+    cc = os.environ.get("CC") or ("clang" if PLAT == "darwin" else "gcc" if IS_WIN else "cc")
 
     cflags = pkg("nss", "--cflags") or _fallback_cflags()
     libs = pkg("nss", "--libs") or _fallback_libs()
@@ -49,6 +49,8 @@ def main():
             else:
                 libs.append(lflag)          # standard system paths (apt / mingw)
     libs.append("-lz")
+    if not (PLAT == "darwin" or IS_WIN):
+        libs.append("-ldl")                      # dladdr (no-op on glibc>=2.34)
 
     if PLAT == "darwin":
         shared = ["-dynamiclib", "-install_name", OUT]
