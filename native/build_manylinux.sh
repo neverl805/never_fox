@@ -40,9 +40,11 @@ cd "$REPO"
 echo "=== build.py ==="; python native/build.py
 echo "=== bundle.py ==="; python native/bundle.py
 for so in native/vendor/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true; done
-echo "--- vendor/ ---"; ls native/vendor/ | grep -iE 'nss|ssl|smime|softokn|freebl|nspr|plc|plds|brotli|zstd' || true
-echo "--- unresolved deps ---"
-LD_LIBRARY_PATH="$PWD/native/vendor:${LD_LIBRARY_PATH:-}" ldd native/libfxtls.so 2>&1 | grep -i 'not found' || echo "  (all resolved)"
+echo "--- from-source NSS version (must be recent, has MLKEM/ECH) ---"
+strings "$(find "$FXTLS_NSS_DIST" -name libnssutil3.so | head -1)" 2>/dev/null \
+  | grep -oE 'Network Security Services [0-9.]+' | head -1 || true
+echo "--- libfxtls.so NSS resolution (rpath only, must point into vendor/) ---"
+ldd native/libfxtls.so 2>&1 | grep -iE 'libnss3|libssl3|libnspr4|not found' || true
 
 # 4) verify — proves glibc-2.17 compatibility AND the FF152 fingerprint
 echo "=== verify.py ==="; python native/verify.py

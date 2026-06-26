@@ -107,10 +107,11 @@ def _lib_dirs():
             dirs.add(d)
             if os.path.isdir(os.path.join(d, "nss")):
                 dirs.add(os.path.join(d, "nss"))
-    for d in ("/usr/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu/nss",
-              "/usr/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu/nss", "/usr/lib64"):
-        if os.path.isdir(d):
-            dirs.add(d)
+    if not dist:                  # only scan system dirs when NOT using from-source NSS
+        for d in ("/usr/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu/nss",
+                  "/usr/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu/nss", "/usr/lib64"):
+            if os.path.isdir(d):
+                dirs.add(d)
     return dirs
 
 
