@@ -285,6 +285,10 @@ int  fxtls_read (fxtls_ctx *c, char *b, int n) {
     if (r < 0 && PR_GetError() == PR_IO_TIMEOUT_ERROR) return -2;
     return r;
 }
-/* unblock a reader thread blocked in PR_Read without freeing the context */
-void fxtls_shutdown(fxtls_ctx *c) { if (c && c->fd) PR_Shutdown(c->fd, PR_SHUTDOWN_BOTH); }
+/* Deprecated no-op. PR_Shutdown on a live SSL fd (while the reader is in PR_Recv,
+ * then double-torn-down by fxtls_close's PR_Close) corrupts process-global NSS
+ * state on keep-alive connections -> the next NSS op segfaults. It also never
+ * unblocked the reader (PR_Shutdown doesn't interrupt PR_Recv on the SSL layer);
+ * the reader exits via its stop flag + read timeout. Kept for ABI only. */
+void fxtls_shutdown(fxtls_ctx *c) { (void)c; }
 void fxtls_close(fxtls_ctx *c) { if (c) { if (c->fd) PR_Close(c->fd); free(c); } }

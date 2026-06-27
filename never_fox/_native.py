@@ -110,10 +110,12 @@ class Transport:
         self._stop = True
 
     def shutdown(self):
-        """Signal the reader to stop and best-effort unblock it — call before close()."""
+        """Signal the reader to stop, then let it exit on its own within one read
+        timeout. Do NOT PR_Shutdown the live SSL fd: on a still-alive keep-alive
+        connection that tears down the TLS/TCP layer while the reader is mid-recv
+        and is then double-torn-down by close()'s PR_Close, corrupting process-
+        global NSS state (next NSS op segfaults). The reader never relied on it."""
         self._stop = True
-        if self.ctx:
-            _lib.fxtls_shutdown(self.ctx)
 
     def close(self):
         if self.ctx:
