@@ -276,12 +276,13 @@ int  fxtls_alpn(fxtls_ctx *c, char *out, int n) {
     memcpy(out, c->alpn, L); out[L] = 0; return L;
 }
 int  fxtls_write(fxtls_ctx *c, const char *b, int n) { return c ? PR_Write(c->fd, b, n) : -1; }
-/* read with a 1s timeout so a reader thread wakes periodically to check for
- * shutdown (PR_Shutdown does not reliably interrupt a blocked PR_Read on macOS).
- * returns >0 bytes, 0 EOF, -1 error, -2 timeout. */
+/* Read with a short timeout so a reader thread wakes periodically to notice its
+ * stop flag (we never PR_Shutdown a live SSL fd — that corrupts NSS, see
+ * fxtls_shutdown). 250ms bounds close() latency to ~1 timeout while staying cheap
+ * for idle keep-alive connections. Returns >0 bytes, 0 EOF, -1 error, -2 timeout. */
 int  fxtls_read (fxtls_ctx *c, char *b, int n) {
     if (!c) return -1;
-    PRInt32 r = PR_Recv(c->fd, b, n, 0, PR_SecondsToInterval(1));
+    PRInt32 r = PR_Recv(c->fd, b, n, 0, PR_MillisecondsToInterval(250));
     if (r < 0 && PR_GetError() == PR_IO_TIMEOUT_ERROR) return -2;
     return r;
 }

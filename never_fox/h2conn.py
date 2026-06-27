@@ -235,7 +235,7 @@ class H2Connection:
                 return
             self._closing = True
         self.closed = True
-        try: self.tp.shutdown()          # set stop flag; reader wakes within ~1s
+        try: self.tp.shutdown()          # set stop flag; reader wakes within one read timeout
         except Exception: pass
         if threading.current_thread() is not self._reader:
             self._reader.join(timeout=3)
@@ -244,5 +244,11 @@ class H2Connection:
             with self._slock:
                 if self._refs == 0: break
             time.sleep(0.005)
-        try: self.tp.close()             # safe now: reader exited and no writer holds it
-        except Exception: pass
+        # Free the native fd only once the reader has truly exited — otherwise it
+        # could still be inside fxtls_read on this fd (use-after-free). If it is
+        # somehow stuck, leak the fd; the OS reclaims it at process exit.
+        reader_done = (threading.current_thread() is self._reader
+                       or not self._reader.is_alive())
+        if reader_done:
+            try: self.tp.close()
+            except Exception: pass

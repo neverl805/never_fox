@@ -82,7 +82,7 @@ class Transport:
     def recv(self, n: int) -> bytes:
         """Read up to n bytes (b'' on EOF). Retries through read timeouts (bounded)."""
         buf = ctypes.create_string_buffer(n)
-        for _ in range(120):                     # ~120s cap of idle waiting
+        for _ in range(480):                     # ~120s cap of idle waiting (480 * 250ms)
             r = _lib.fxtls_read(self.ctx, buf, n)
             if r == -2:                          # read timeout -> retry
                 if self._stop: return b""
