@@ -47,26 +47,33 @@ def _server(port, crt, key, ready):
 
 
 def main():
-    crt, key = os.environ.get("FXTLS_REPRO_CERT"), os.environ.get("FXTLS_REPRO_KEY")
-    if not crt:
-        crt, key = _make_cert()
-    port = 9443
-    ready = threading.Event()
-    threading.Thread(target=_server, args=(port, crt, key, ready), daemon=True).start()
-    ready.wait(5); time.sleep(0.3)
-
+    # Point this at YOUR crashing target on a machine where it reproduces (real
+    # cert validation + real/GFW resets), e.g.:
+    #   FXTLS_DEBUG=1 FXTLS_REPRO_URL=https://httpbin.org/get python native/_debug_repro.py
+    # With no URL it uses a local self-signed server (verify off) for CI.
+    url = os.environ.get("FXTLS_REPRO_URL")
+    verify = bool(url)                                   # real target -> verify=True (matches the report)
+    if not url:
+        crt, key = os.environ.get("FXTLS_REPRO_CERT"), os.environ.get("FXTLS_REPRO_KEY")
+        if not crt:
+            crt, key = _make_cert()
+        port = 9443
+        ready = threading.Event()
+        threading.Thread(target=_server, args=(port, crt, key, ready), daemon=True).start()
+        ready.wait(5); time.sleep(0.3)
+        url = f"https://localhost:{port}/"
     import never_fox as nf
-    url = f"https://localhost:{port}/"
+    print(f"target={url} verify={verify} mode={MODE}", flush=True)
 
-    print(f"=== A: Session(retries=2).get (internal retry -> reconnect), mode={MODE} ===", flush=True)
-    s = nf.Session(verify=False, retries=2)
+    print(f"=== A: Session(retries=2).get (internal retry -> reconnect) ===", flush=True)
+    s = nf.Session(verify=verify, retries=2)
     try: s.get(url, timeout=5)
     except Exception as e: print(f"  A raised {type(e).__name__}", flush=True)
     print("  A survived the retry-reconnect", flush=True)
     s.close()
 
     print("=== B: Session(retries=1) x3 sequential gets ===", flush=True)
-    s2 = nf.Session(verify=False, retries=1)
+    s2 = nf.Session(verify=verify, retries=1)
     for i in range(3):
         try: s2.get(url, timeout=5)
         except Exception as e: print(f"  B get{i} raised {type(e).__name__}", flush=True)
