@@ -96,8 +96,12 @@ jobs:
         run: |
           python -m pip install --quiet hpack 2>/dev/null \
             || python -m pip install --quiet --break-system-packages hpack 2>/dev/null || true
-          FXTLS_DEBUG=1 python native/_debug_repro.py 2>&1
-          echo "=== repro exit code: $? (large/139 = segfault, 0 = clean) ==="
+          echo "########## mode=fin (graceful close) ##########"
+          FXTLS_DEBUG=1 FXTLS_REPRO_MODE=fin python native/_debug_repro.py 2>&1
+          echo "=== fin exit code: $? ==="
+          echo "########## mode=rst (Cloudflare-style reset) ##########"
+          FXTLS_DEBUG=1 FXTLS_REPRO_MODE=rst python native/_debug_repro.py 2>&1
+          echo "=== rst exit code: $? (large/139 = segfault, 0 = clean) ==="
       - name: build wheel + smoke (windows, stock CPython)
         if: runner.os == 'Windows'
         run: |

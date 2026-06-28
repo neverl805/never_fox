@@ -1,16 +1,20 @@
-"""Reproduce the Windows "peer RST -> next fxtls_connect segfaults" crash, with
-FXTLS_DEBUG traces, on CI (since it can't be reproduced on macOS).
+"""Reproduce the Windows "peer close -> retry/reconnect segfaults" crash on CI
+(can't be reproduced on macOS). Uses the Session pool + retry path (the tester's
+actual crash path: _get_conn / _reap / retry), NOT a bare H2Connection.
 
-Starts a local TLS+h2 server that RSTs right after reading the request, then runs:
-  req0: connect + request  -> peer RST (a clean ConnectionError is expected)
-  req1: a fresh fxtls_connect -> this is where Windows faults (0xC0000005)
+Local TLS+h2 server completes the handshake, reads the request, then closes the
+connection (so the client's write succeeds and its reader sees EOF -> a clean
+ConnectionError "connection closed by peer", matching the report). Then:
+  - Session(retries=2).get  -> attempt0 closed, internal retry reconnects  <- crash point
+  - Session(retries=1) x3   -> get0 closed clean, get1 reconnects           <- crash point
 Run with FXTLS_DEBUG=1; the last "[fxtls] ..." line before the crash pinpoints the
-exact native step that dies. Exit code 0 = no crash; large/negative = segfault.
+dying native call. Exit 0 = clean; large/139 = segfault.
 """
 import os, sys, ssl, socket, struct, threading, time, subprocess, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+MODE = os.environ.get("FXTLS_REPRO_MODE", "fin")        # 'fin' or 'rst'
 
 
 def _make_cert():
@@ -22,20 +26,22 @@ def _make_cert():
     return crt, key
 
 
-def _rst_server(port, crt, key, ready):
+def _server(port, crt, key, ready):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     ctx.set_alpn_protocols(["h2", "http/1.1"])
     srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", port)); srv.listen(8); ready.set()
+    srv.bind(("127.0.0.1", port)); srv.listen(16); ready.set()
     while True:
         conn, _ = srv.accept()
         try:
-            ss = ctx.wrap_socket(conn, server_side=True)
-            try: ss.recv(4096)
+            ss = ctx.wrap_socket(conn, server_side=True)   # complete the TLS handshake
+            ss.settimeout(2)
+            try: ss.recv(65536)                            # read the request (lets client's write finish)
             except Exception: pass
-            ss.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # RST on close
-            ss.close()
+            if MODE == "rst":
+                ss.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            ss.close()                                     # peer closes -> client reader sees EOF
         except Exception:
             pass
 
@@ -46,21 +52,27 @@ def main():
         crt, key = _make_cert()
     port = 9443
     ready = threading.Event()
-    threading.Thread(target=_rst_server, args=(port, crt, key, ready), daemon=True).start()
+    threading.Thread(target=_server, args=(port, crt, key, ready), daemon=True).start()
     ready.wait(5); time.sleep(0.3)
 
-    from never_fox import _native, h2conn
-    from never_fox.client import DEFAULT_HEADERS
+    import never_fox as nf
+    url = f"https://localhost:{port}/"
+
+    print(f"=== A: Session(retries=2).get (internal retry -> reconnect), mode={MODE} ===", flush=True)
+    s = nf.Session(verify=False, retries=2)
+    try: s.get(url, timeout=5)
+    except Exception as e: print(f"  A raised {type(e).__name__}", flush=True)
+    print("  A survived the retry-reconnect", flush=True)
+    s.close()
+
+    print("=== B: Session(retries=1) x3 sequential gets ===", flush=True)
+    s2 = nf.Session(verify=False, retries=1)
     for i in range(3):
-        print(f"=== req{i}: connect ===", flush=True)
-        tp = _native.Transport("localhost", port, 8, False, None)
-        c = h2conn.H2Connection(tp); c.acquire()
-        try:
-            c.request("GET", "/", "localhost", DEFAULT_HEADERS, b"", timeout=5)
-        except Exception as e:
-            print(f"  req{i} raised {type(e).__name__}", flush=True)
-        c.close()
-        print(f"  req{i} done (peer_eof={getattr(tp, '_peer_eof', None)})", flush=True)
+        try: s2.get(url, timeout=5)
+        except Exception as e: print(f"  B get{i} raised {type(e).__name__}", flush=True)
+        print(f"  B get{i} survived", flush=True)
+    s2.close()
+
     print("DONE no crash", flush=True)
 
 
