@@ -141,6 +141,13 @@ static fxtls_ctx *fxtls__finish(PRFileDesc *tcp, const char *host, int verify) {
     if (verify) SSL_AuthCertificateHook(s, SSL_AuthCertificate, CERT_GetDefaultCertDB());
     else        SSL_AuthCertificateHook(s, fxtls__accept, NULL);
     SSL_ResetHandshake(s, PR_FALSE);
+    /* Empty the client session cache before every handshake: NSS still advertises
+     * session_ticket(35) + psk_key_exchange_modes(45) (from SSL_ENABLE_SESSION_TICKETS,
+     * so the ClientHello stays byte-for-byte FF152, just never resumes), but no sid
+     * is ever resumed/used. This kills the "peer RST corrupts a cached sid -> the
+     * next fxtls_connect reads it and segfaults" class of crash, and keeps the
+     * fingerprint consistent at Firefox's first-connection shape (no pre_shared_key). */
+    SSL_ClearSessionCache();
     if (SSL_ForceHandshake(s) != SECSuccess) {
         g_last_err = PR_GetError(); g_last_stage = "handshake";
         if (getenv("FXTLS_DEBUG"))

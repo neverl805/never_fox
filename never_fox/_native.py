@@ -34,6 +34,12 @@ _lib.fxtls_read.argtypes    = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
 _lib.fxtls_shutdown.argtypes = [ctypes.c_void_p]
 _lib.fxtls_close.argtypes   = [ctypes.c_void_p]
 
+# Initialize NSS once, here, at import time (single-threaded): fxtls__ensure_init
+# is not internally locked, so without this two threads opening a cold connection
+# pool would call NSS_NoDB_Init concurrently and crash. Doing it now means g_init
+# is already set before any worker thread connects.
+_lib.fxtls_have_roots()
+
 
 class Transport:
     """A genuine-Firefox-152 TLS connection to one host:port."""
