@@ -61,7 +61,9 @@ jobs:
       - name: debug repro (macos) — peer RST baseline (should be clean)
         if: runner.os == 'macOS'
         continue-on-error: true
-        run: FXTLS_DEBUG=1 python3 native/_debug_repro.py 2>&1; echo "=== repro exit: $? ==="
+        run: |
+          FXTLS_DEBUG=1 python3 native/_debug_repro.py 2>&1
+          echo "=== repro exit code $? (0 = clean) ==="
 
       # ---- Windows: engine from MSYS2 (mingw), wheel from stock CPython ----
       - name: setup python (windows)            # stock CPython -> correct win_amd64 tag
