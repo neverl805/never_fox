@@ -45,6 +45,10 @@ static int g_last_err = 0;   /* last NSPR/NSS error on a failed connect/handshak
 static const char *g_last_stage = "ok";   /* which stage failed */
 static int g_nss_ok = 0;   /* 1 once NSS_NoDB_Init (softokn/freebl) succeeds */
 
+/* flushed debug trace (survives a segfault) so a crashing Windows run pinpoints
+ * the exact native step. Enable with FXTLS_DEBUG=1. */
+#define FXDBG(...) do { if (getenv("FXTLS_DEBUG")) { fprintf(stderr, "[fxtls] " __VA_ARGS__); fflush(stderr); } } while (0)
+
 /* permissive hook used only when verify == 0 (like `curl -k`) */
 static SECStatus fxtls__accept(void *arg, PRFileDesc *fd, PRBool cs, PRBool srv) {
     return SECSuccess;
@@ -133,8 +137,10 @@ int fxtls_nss_ok(void) { fxtls__ensure_init(); return g_nss_ok; }
 /* run the Firefox-152 TLS handshake to `host` on an already-connected TCP socket
  * and wrap it in a context. Closes `tcp` and returns NULL on failure. */
 static fxtls_ctx *fxtls__finish(PRFileDesc *tcp, const char *host, int verify) {
+    FXDBG("finish: SSL_ImportFD %s\n", host);
     PRFileDesc *s = SSL_ImportFD(NULL, tcp);
     if (!s) { g_last_err = PR_GetError(); g_last_stage = "ssl-import"; PR_Close(tcp); return NULL; }
+    FXDBG("finish: configure\n");
     if (fxtls_configure(s, 100) != SECSuccess) {
         g_last_err = PR_GetError(); g_last_stage = "configure"; PR_Close(s); return NULL; }
     SSL_SetURL(s, host);
@@ -147,7 +153,9 @@ static fxtls_ctx *fxtls__finish(PRFileDesc *tcp, const char *host, int verify) {
      * is ever resumed/used. This kills the "peer RST corrupts a cached sid -> the
      * next fxtls_connect reads it and segfaults" class of crash, and keeps the
      * fingerprint consistent at Firefox's first-connection shape (no pre_shared_key). */
+    FXDBG("finish: SSL_ClearSessionCache\n");
     SSL_ClearSessionCache();
+    FXDBG("finish: SSL_ForceHandshake\n");
     if (SSL_ForceHandshake(s) != SECSuccess) {
         g_last_err = PR_GetError(); g_last_stage = "handshake";
         if (getenv("FXTLS_DEBUG"))
@@ -179,6 +187,7 @@ static PRFileDesc *fxtls__tcp(const char *host, int port, int to) {
 }
 
 fxtls_ctx *fxtls_connect(const char *host, int port, int timeout_s, int verify) {
+    FXDBG("connect: %s:%d\n", host, port);
     fxtls__ensure_init();
     PRFileDesc *tcp = fxtls__tcp(host, port, timeout_s > 0 ? timeout_s : 15);
     if (!tcp) { g_last_err = PR_GetError(); g_last_stage = "tcp-connect"; return NULL; }

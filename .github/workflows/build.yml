@@ -58,6 +58,10 @@ jobs:
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/venv/bin/python" -c "import never_fox; from never_fox import _native; \
           r=_native._lib.fxtls_have_roots(); print('have_roots=', r); assert r==1; print('wheel OK')"
+      - name: debug repro (macos) — peer RST baseline (should be clean)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: FXTLS_DEBUG=1 python3 native/_debug_repro.py 2>&1; echo "=== repro exit: $? ==="
 
       # ---- Windows: engine from MSYS2 (mingw), wheel from stock CPython ----
       - name: setup python (windows)            # stock CPython -> correct win_amd64 tag
@@ -74,7 +78,7 @@ jobs:
             mingw-w64-x86_64-gcc mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-nss mingw-w64-x86_64-nspr
             mingw-w64-x86_64-brotli mingw-w64-x86_64-zstd mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-python
+            mingw-w64-x86_64-python openssl
       - name: build engine + verify (windows, msys2)
         if: runner.os == 'Windows'
         shell: msys2 {0}
@@ -83,6 +87,13 @@ jobs:
           python native/bundle.py || echo "bundle: best-effort"
           python native/verify.py
           python native/stage_lib.py
+      - name: debug repro (windows) — peer RST -> reconnect crash
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        continue-on-error: true              # we want the trace even if it segfaults
+        run: |
+          FXTLS_DEBUG=1 python native/_debug_repro.py 2>&1
+          echo "=== repro exit code: $? (large/139 = segfault, 0 = clean) ==="
       - name: build wheel + smoke (windows, stock CPython)
         if: runner.os == 'Windows'
         run: |
