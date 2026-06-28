@@ -62,7 +62,7 @@ jobs:
         if: runner.os == 'macOS'
         continue-on-error: true
         run: |
-          FXTLS_DEBUG=1 python3 native/_debug_repro.py 2>&1
+          FXTLS_DEBUG=1 "$RUNNER_TEMP/venv/bin/python" native/_debug_repro.py 2>&1
           echo "=== repro exit code $? (0 = clean) ==="
 
       # ---- Windows: engine from MSYS2 (mingw), wheel from stock CPython ----
@@ -80,7 +80,7 @@ jobs:
             mingw-w64-x86_64-gcc mingw-w64-x86_64-pkg-config
             mingw-w64-x86_64-nss mingw-w64-x86_64-nspr
             mingw-w64-x86_64-brotli mingw-w64-x86_64-zstd mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-python openssl
+            mingw-w64-x86_64-python mingw-w64-x86_64-python-pip openssl
       - name: build engine + verify (windows, msys2)
         if: runner.os == 'Windows'
         shell: msys2 {0}
@@ -94,6 +94,8 @@ jobs:
         shell: msys2 {0}
         continue-on-error: true              # we want the trace even if it segfaults
         run: |
+          python -m pip install --quiet hpack 2>/dev/null \
+            || python -m pip install --quiet --break-system-packages hpack 2>/dev/null || true
           FXTLS_DEBUG=1 python native/_debug_repro.py 2>&1
           echo "=== repro exit code: $? (large/139 = segfault, 0 = clean) ==="
       - name: build wheel + smoke (windows, stock CPython)
