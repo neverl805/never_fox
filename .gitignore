@@ -12,6 +12,13 @@ native/vendor/
 # neqo: large third-party clone + Rust build (~343MB). See README for HTTP/3 setup.
 native/neqo/
 
+# h3 build: native/h3/build_h3.py clones+builds these; the prebuilt binary is
+# staged into the wheel by stage_lib.py. Keep the patched source files (native/h3/files/).
+native/h3/build/
+native/h3/neqo-client
+native/h3/neqo-client.exe
+native/h3/*.tgz
+
 # Fingerprint capture artifacts (regenerable by the harness)
 captures/
 harness/localcap/*.json

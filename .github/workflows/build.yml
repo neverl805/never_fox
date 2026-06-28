@@ -48,6 +48,15 @@ jobs:
           python3 native/build.py
           python3 native/bundle.py
           python3 native/verify.py
+          # h3 backend: Firefox-aligned neqo-client (links Homebrew NSS via pkg-config,
+          # NSS >= 3.121 so no from-source build). Non-fatal: on failure h3 is simply
+          # absent and the client falls back to HTTP/2.
+          command -v cargo >/dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          . "$HOME/.cargo/env" 2>/dev/null || true
+          export PKG_CONFIG_PATH="$(brew --prefix nss)/lib/pkgconfig:$(brew --prefix nspr)/lib/pkgconfig"
+          export LIBCLANG_PATH=/Library/Developer/CommandLineTools/usr/lib
+          export H3_OUT="$PWD/native/h3/neqo-client" CARGO_BUILD_JOBS=3
+          python3 native/h3/build_h3.py || echo ">>> h3 build failed (non-fatal; h3 -> h2 fallback)"
           python3 native/stage_lib.py
           python3 -m pip wheel . --no-deps -w dist
       - name: smoke test (macos)
