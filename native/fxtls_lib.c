@@ -292,5 +292,14 @@ int  fxtls_read (fxtls_ctx *c, char *b, int n) {
  * reader thread has exited (never concurrently with PR_Recv — that was the
  * original keep-alive crash) and ONLY for peer-closed fds (a live fd doesn't need
  * it and PR_Shutdown there is what corrupted state before). See _native.close(). */
-void fxtls_shutdown(fxtls_ctx *c) { if (c && c->fd) PR_Shutdown(c->fd, PR_SHUTDOWN_BOTH); }
-void fxtls_close(fxtls_ctx *c) { if (c) { if (c->fd) PR_Close(c->fd); free(c); } }
+void fxtls_shutdown(fxtls_ctx *c) {
+    if (getenv("FXTLS_DEBUG")) { fprintf(stderr, "fxtls_shutdown(ctx=%p fd=%p)\n",
+                                         (void *)c, (void *)(c ? c->fd : 0)); fflush(stderr); }
+    if (c && c->fd) PR_Shutdown(c->fd, PR_SHUTDOWN_BOTH);
+}
+void fxtls_close(fxtls_ctx *c) {
+    if (getenv("FXTLS_DEBUG")) { fprintf(stderr, "fxtls_close(ctx=%p fd=%p) PR_Close\n",
+                                         (void *)c, (void *)(c ? c->fd : 0)); fflush(stderr); }
+    if (c) { if (c->fd) PR_Close(c->fd); free(c); }
+    if (getenv("FXTLS_DEBUG")) { fprintf(stderr, "fxtls_close done\n"); fflush(stderr); }
+}
