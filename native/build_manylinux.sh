@@ -64,6 +64,18 @@ PY
 # 4) verify — proves glibc-2.17 compatibility AND the FF152 fingerprint
 echo "=== verify.py ==="; python native/verify.py
 
+# 4b) h3 backend: Firefox-aligned neqo-client, built IN-CONTAINER against the SAME
+#     from-source NSS (one glibc-2.17 version, fingerprint-consistent with fxtls).
+#     rust + clang/libclang come from conda-forge (glibc 2.17, avoids CentOS7 EOL repos).
+#     Non-fatal: on failure h3 is simply absent and the client falls back to HTTP/2.
+echo "=== build h3 neqo-client (conda rust+clang, reuse from-source NSS) ==="
+/opt/conda/bin/conda install -y -n fx -c conda-forge rust clang clangdev libclang || true
+export LIBCLANG_PATH="$PFX/lib"
+export H3_NSS_DIR="/tmp/nssbuild/nss" NSS_PREBUILT=1
+export H3_OUT="$REPO/native/h3/neqo-client" CARGO_BUILD_JOBS=2
+python native/h3/build_h3.py || echo "  >>> h3 build failed (non-fatal; h3 -> h2 fallback)"
+[ -f "$REPO/native/h3/neqo-client" ] && patchelf --force-rpath --set-rpath '$ORIGIN/vendor:$ORIGIN' "$REPO/native/h3/neqo-client" 2>/dev/null || true
+
 # 5) build the wheel, retag linux_* -> manylinux2014, smoke-test on a stock CPython
 echo "=== wheel ==="
 python native/stage_lib.py

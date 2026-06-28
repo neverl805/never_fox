@@ -24,7 +24,20 @@ def main():
     for f in glob.glob(os.path.join(HERE, "vendor", "*")):
         if os.path.isfile(f):
             shutil.copy2(f, os.path.join(DST, "vendor")); n += 1
-    print(f"staged {len(libs)} lib(s) + {n} vendored dep(s) -> {DST}")
+
+    # h3: bundle the prebuilt Firefox-aligned neqo-client (built by native/h3/build_h3.py)
+    # if present. It links the bundled NSS at runtime (h3.py sets the library path), so
+    # no extra vendoring is needed. Absent on platforms where h3 isn't built (e.g.
+    # Windows) — h3.py then reports unavailable and the client falls back to HTTP/2.
+    h3 = 0
+    for nq in ("neqo-client", "neqo-client.exe"):
+        src = os.path.join(ROOT, "native", "h3", nq)
+        if os.path.isfile(src):
+            dst = os.path.join(DST, nq)
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+            h3 += 1
+    print(f"staged {len(libs)} lib(s) + {n} vendored dep(s) + {h3} h3 backend -> {DST}")
 
 
 if __name__ == "__main__":
