@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "never_fox"
-version = "0.3.4"
+version = "0.3.5"
 description = "Browser-level (Firefox 152) HTTP client — real NSS TLS, HTTP/2, byte-identical fingerprint"
 readme = "README.md"
 requires-python = ">=3.8"
