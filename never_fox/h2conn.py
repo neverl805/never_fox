@@ -235,8 +235,7 @@ class H2Connection:
                 return
             self._closing = True
         self.closed = True
-        try: self.tp.shutdown()          # set stop flag; reader wakes within one read timeout
-        except Exception: pass
+        self.tp.stop_reads()             # set stop flag; reader exits within one read timeout
         if threading.current_thread() is not self._reader:
             self._reader.join(timeout=3)
         self._fail_all(ConnectionError("connection closed"))

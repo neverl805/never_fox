@@ -40,6 +40,7 @@ class Transport:
     def __init__(self, host, port=443, timeout=15, verify=True, proxy=None):
         self.host = host
         self._stop = False
+        self._peer_eof = False                   # set once a read sees the peer close (EOF/RST)
         if proxy:                                # (scheme, host, port, user, pass)
             scheme, ph, pp, user, pw = proxy
             if scheme.startswith("socks"):
@@ -87,7 +88,10 @@ class Transport:
             if r == -2:                          # read timeout -> retry
                 if self._stop: return b""
                 continue
-            return buf.raw[:r] if r > 0 else b""
+            if r <= 0:                           # peer closed (EOF/RST)
+                self._peer_eof = True
+                return b""
+            return buf.raw[:r]
         return b""
 
     def recvn(self, n: int) -> bytes:
@@ -101,7 +105,8 @@ class Transport:
                 if self._stop:
                     break
                 continue
-            if r <= 0:
+            if r <= 0:                           # peer closed (EOF/RST)
+                self._peer_eof = True
                 break
             out += buf.raw[:r]
         return bytes(out)
@@ -110,15 +115,21 @@ class Transport:
         self._stop = True
 
     def shutdown(self):
-        """Signal the reader to stop, then let it exit on its own within one read
-        timeout. Do NOT PR_Shutdown the live SSL fd: on a still-alive keep-alive
-        connection that tears down the TLS/TCP layer while the reader is mid-recv
-        and is then double-torn-down by close()'s PR_Close, corrupting process-
-        global NSS state (next NSS op segfaults). The reader never relied on it."""
+        """Signal the reader to stop; it exits on its own within one read timeout.
+        Does NOT touch the SSL fd (PR_Shutdown on a LIVE fd, concurrently with the
+        reader's PR_Recv, corrupted global NSS state — the original keep-alive
+        crash). The actual teardown happens in close(), after the reader exits."""
         self._stop = True
 
     def close(self):
+        """Tear down the connection. MUST be called only after the reader thread has
+        exited (no concurrent PR_Recv). If the PEER already closed (EOF/RST), drain
+        the fd with PR_Shutdown first: PR_Close alone on a peer-reset SSL fd double-
+        frees the torn-down state and the next NSS op segfaults (Windows). On a live
+        fd we skip PR_Shutdown (doing it there is what corrupted state)."""
         if self.ctx:
+            if self._peer_eof:
+                _lib.fxtls_shutdown(self.ctx)    # drain a peer-closed fd before PR_Close
             _lib.fxtls_close(self.ctx)
             self.ctx = None
 

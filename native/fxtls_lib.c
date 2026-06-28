@@ -286,10 +286,11 @@ int  fxtls_read (fxtls_ctx *c, char *b, int n) {
     if (r < 0 && PR_GetError() == PR_IO_TIMEOUT_ERROR) return -2;
     return r;
 }
-/* Deprecated no-op. PR_Shutdown on a live SSL fd (while the reader is in PR_Recv,
- * then double-torn-down by fxtls_close's PR_Close) corrupts process-global NSS
- * state on keep-alive connections -> the next NSS op segfaults. It also never
- * unblocked the reader (PR_Shutdown doesn't interrupt PR_Recv on the SSL layer);
- * the reader exits via its stop flag + read timeout. Kept for ABI only. */
-void fxtls_shutdown(fxtls_ctx *c) { (void)c; }
+/* Drain a fd whose PEER has already closed (EOF/RST), BEFORE fxtls_close's
+ * PR_Close — otherwise PR_Close double-frees the RST-corrupted SSL state and the
+ * next NSS op segfaults (seen on Windows). Caller MUST only invoke this after the
+ * reader thread has exited (never concurrently with PR_Recv — that was the
+ * original keep-alive crash) and ONLY for peer-closed fds (a live fd doesn't need
+ * it and PR_Shutdown there is what corrupted state before). See _native.close(). */
+void fxtls_shutdown(fxtls_ctx *c) { if (c && c->fd) PR_Shutdown(c->fd, PR_SHUTDOWN_BOTH); }
 void fxtls_close(fxtls_ctx *c) { if (c) { if (c->fd) PR_Close(c->fd); free(c); } }
