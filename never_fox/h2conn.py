@@ -59,20 +59,29 @@ class H2Connection:
         # connection closed for NEW streams but in-flight streams still get their
         # responses, so we must keep reading.
         try:
-            while True:
-                hdr = self.tp.recvn(9)
-                if len(hdr) < 9:
-                    break
-                length = (hdr[0] << 16) | (hdr[1] << 8) | hdr[2]
-                ftype, flags = hdr[3], hdr[4]
-                sid = struct.unpack(">I", hdr[5:9])[0] & 0x7fffffff
-                payload = self.tp.recvn(length) if length else b""
-                if length and len(payload) < length:    # connection closed mid-frame
-                    break
-                self._dispatch(ftype, flags, sid, payload)
-        except Exception as e:
-            self._fail_all(e); return
-        self._fail_all(ConnectionError("connection closed by peer"))
+            try:
+                while True:
+                    hdr = self.tp.recvn(9)
+                    if len(hdr) < 9:
+                        break
+                    length = (hdr[0] << 16) | (hdr[1] << 8) | hdr[2]
+                    ftype, flags = hdr[3], hdr[4]
+                    sid = struct.unpack(">I", hdr[5:9])[0] & 0x7fffffff
+                    payload = self.tp.recvn(length) if length else b""
+                    if length and len(payload) < length:    # connection closed mid-frame
+                        break
+                    self._dispatch(ftype, flags, sid, payload)
+            except Exception as e:
+                self._fail_all(e); return
+            self._fail_all(ConnectionError("connection closed by peer"))
+        finally:
+            # The reader is the only thread that does socket I/O (PR_Recv) on this fd,
+            # so it MUST also be the thread that tears it down (PR_Close). Closing from
+            # a different OS thread than the one that has been reading corrupts NSPR's
+            # per-fd I/O bookkeeping on the Windows build and segfaults a later op
+            # (0xC0000005). POSIX NSPR was unaffected, but same-thread teardown is the
+            # correct, portable rule. Wait out in-flight writers (refs) first.
+            self._teardown_transport()
 
     def _finish_headers(self):
         st = self._get(self._hsid)
@@ -228,26 +237,30 @@ class H2Connection:
             if self._refs > 0:
                 self._refs -= 1
 
+    def _teardown_transport(self):
+        # Free the native fd once in-flight writers (refs) have drained. Idempotent
+        # (tp.close() no-ops if already closed). Called from the reader thread's
+        # finally, or directly by close() when there is no live reader to do it.
+        for _ in range(400):             # bounded wait (~2s) for in-flight writes
+            with self._slock:
+                if self._refs == 0: break
+            time.sleep(0.005)
+        try: self.tp.close()
+        except Exception: pass
+
     def close(self):
-        # idempotent; sequence: stop reads -> let reader exit -> free transport.
+        # idempotent; sequence: stop reads -> reader exits and, on ITS OWN THREAD,
+        # fails pending streams + tears down the fd (see _read_loop's finally).
         with self._slock:
             if self._closing:
                 return
             self._closing = True
         self.closed = True
         self.tp.stop_reads()             # set stop flag; reader exits within one read timeout
-        if threading.current_thread() is not self._reader:
-            self._reader.join(timeout=3)
-        self._fail_all(ConnectionError("connection closed"))
-        for _ in range(200):             # wait for in-flight writes (refs) to finish
-            with self._slock:
-                if self._refs == 0: break
-            time.sleep(0.005)
-        # Free the native fd only once the reader has truly exited — otherwise it
-        # could still be inside fxtls_read on this fd (use-after-free). If it is
-        # somehow stuck, leak the fd; the OS reclaims it at process exit.
-        reader_done = (threading.current_thread() is self._reader
-                       or not self._reader.is_alive())
-        if reader_done:
-            try: self.tp.close()
-            except Exception: pass
+        if threading.current_thread() is not self._reader and self._reader.is_alive():
+            # Normal case: the reader does _fail_all + PR_Close itself; just wait.
+            self._reader.join(timeout=5)
+        else:
+            # Re-entrant close from the reader, or the reader already gone: do it here.
+            self._fail_all(ConnectionError("connection closed"))
+            self._teardown_transport()

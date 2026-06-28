@@ -8,7 +8,7 @@ from .client import (Session, Response, HTTPError, DEFAULT_HEADERS, FF_UA,
 __all__ = ["Session", "Response", "HTTPError", "AsyncSession",
            "get", "post", "put", "delete", "head", "request",
            "DEFAULT_HEADERS", "FF_UA"]
-__version__ = "0.3.0"
+__version__ = "0.3.4"
 
 
 def __getattr__(name):
