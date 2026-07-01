@@ -5,7 +5,7 @@ Built for high-concurrency crawling: multiple pooled HTTP/2 connections per host
 (each multiplexing many streams), cookie persistence, automatic redirects, and a
 requests-compatible Session / Response surface.
 """
-import json as _json, gzip, zlib, threading, time, base64
+import json as _json, gzip, zlib, threading, time, base64, random
 from urllib.parse import urlsplit, urlencode, urljoin
 from . import _native, h2conn, http1, h3
 from .cookies import CookieJar
@@ -37,6 +37,27 @@ def _host_has_h3(host):
     with _H3_LOCK:
         return host in _H3_HOSTS
 
+
+def _reg_domain(host):
+    """Approximate registrable domain (last two labels; no public-suffix list). Good
+    enough to tell same-site from cross-site for the Sec-Fetch-Site header."""
+    parts = (host or "").split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (host or "")
+
+
+def _sec_fetch_site(prev_scheme, prev_host, prev_port, new_url):
+    """Sec-Fetch-Site for a redirected navigation, from the origin relationship between
+    the redirecting page and the target — Firefox sends same-origin / same-site /
+    cross-site here, NOT 'none' (which only means a user-typed address-bar load)."""
+    ns = new_url.scheme
+    nh = new_url.hostname
+    npp = new_url.port or (443 if ns == "https" else 80)
+    if (prev_scheme, prev_host, prev_port) == (ns, nh, npp):
+        return "same-origin"
+    if _reg_domain(prev_host) == _reg_domain(nh):
+        return "same-site"
+    return "cross-site"
+
 FF_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) "
          "Gecko/20100101 Firefox/152.0")
 
@@ -65,6 +86,17 @@ class HTTPError(Exception):
     pass
 
 
+# Methods safe to auto-retry on a transport error: a retry may re-send the request,
+# so non-idempotent methods (POST/PATCH) must not be retried or the peer could act on
+# a duplicate. Matches urllib3/requests' default retry allowlist.
+IDEMPOTENT = frozenset({"GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"})
+
+# Caller-supplied headers that must NOT survive a redirect to a different host — else
+# credentials leak to the redirect target (browsers/requests strip these cross-origin).
+# The cookie jar is already re-evaluated per-host, so this only guards explicit headers.
+_SENSITIVE_ON_REDIRECT = frozenset({"authorization", "cookie", "proxy-authorization"})
+
+
 class RateLimiter:
     """Per-host pacing: at most `rate` requests/second per host (0 = unlimited).
     delay() reserves the next slot and returns how long the caller should wait."""
@@ -80,35 +112,68 @@ class RateLimiter:
             now = time.monotonic()
             start = max(now, self._next.get(host, 0.0))
             self._next[host] = start + self.interval
-            return start - now
+            wait = start - now
+        # ±15% jitter: a mechanically uniform cadence is itself a bot signal. The mean
+        # rate is preserved (the reservation is still spaced by `interval`).
+        return max(0.0, wait + self.interval * random.uniform(-0.15, 0.15))
 
 
 def _retry_after(resp, attempt):
     ra = resp.headers.get("retry-after", "")
     if ra.isdigit():
-        return min(int(ra), 60)
-    return min(2 ** attempt, 30)        # exponential backoff, capped
+        return min(int(ra), 60)             # honor a server-specified delay exactly
+    base = min(2 ** attempt, 30)            # equal-jitter exponential backoff: half fixed,
+    return base / 2 + random.uniform(0, base / 2)   # half random (de-synchronises retries)
 
 
-def _decompress(body, enc):
+def _bounded_zlib(body, wbits, limit):
+    d = zlib.decompressobj(wbits)
+    if not limit:
+        return d.decompress(body) + d.flush()
+    out = d.decompress(body, limit + 1)           # cap this call's output
+    if len(out) > limit or d.unconsumed_tail:     # more remained -> over the limit
+        raise HTTPError(f"decompressed body exceeded max_response_bytes ({limit})")
+    out += d.flush()
+    if len(out) > limit:
+        raise HTTPError(f"decompressed body exceeded max_response_bytes ({limit})")
+    return out
+
+
+def _decompress(body, enc, limit=0):
+    """Decode Content-Encoding. `limit` (bytes, 0=off) bounds the *decompressed* size
+    to defuse decompression bombs; exceeding it raises HTTPError rather than OOM-ing.
+    An unknown or corrupt encoding falls back to the raw bytes (best-effort)."""
     enc = (enc or "").lower()
+    if not enc or enc == "identity":
+        return body
     try:
-        if enc == "gzip":   return gzip.decompress(body)
+        if enc == "gzip":
+            return _bounded_zlib(body, 16 + zlib.MAX_WBITS, limit)
         if enc == "deflate":
-            try: return zlib.decompress(body)
-            except zlib.error: return zlib.decompress(body, -zlib.MAX_WBITS)
-        if enc == "br":     import brotli; return brotli.decompress(body)
+            try:               return _bounded_zlib(body, zlib.MAX_WBITS, limit)
+            except zlib.error: return _bounded_zlib(body, -zlib.MAX_WBITS, limit)
+        if enc == "br":
+            import brotli
+            out = brotli.decompress(body)         # one-shot (input already h2-capped)
+            if limit and len(out) > limit:
+                raise HTTPError(f"decompressed body exceeded max_response_bytes ({limit})")
+            return out
         if enc == "zstd":
-            import zstandard
-            d = zstandard.ZstdDecompressor().decompressobj()  # handles streaming frames
-            return d.decompress(body) + d.flush()
+            import io, zstandard
+            rdr = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(body))
+            out = rdr.read((limit + 1) if limit else -1)   # bounded read
+            if limit and len(out) > limit:
+                raise HTTPError(f"decompressed body exceeded max_response_bytes ({limit})")
+            return out
+    except HTTPError:
+        raise
     except Exception:
         return body
     return body
 
 
 class Response:
-    def __init__(self, status, headers, body, proto, url=""):
+    def __init__(self, status, headers, body, proto, url="", max_bytes=0):
         self.status_code = status
         self.http_version = proto
         self.url = url
@@ -116,7 +181,7 @@ class Response:
         self.raw_headers = headers
         self.headers = {k.lower(): v for k, v in headers}
         self._raw = body
-        self.content = _decompress(body, self.headers.get("content-encoding"))
+        self.content = _decompress(body, self.headers.get("content-encoding"), max_bytes)
         self.history = []
         self.cookies = {}
         self.elapsed = 0.0
@@ -155,7 +220,7 @@ class Response:
 class Session:
     def __init__(self, headers=None, verify=True, h3="auto", proxy=None,
                  max_connections_per_host=6, max_redirects=20, retries=3,
-                 rate_limit=0, backoff_retries=2):
+                 rate_limit=0, backoff_retries=2, max_response_bytes=None):
         self.headers = list(DEFAULT_HEADERS if headers is None else headers)
         self.verify = verify
         self.h3 = h3
@@ -166,10 +231,15 @@ class Session:
         self.max_redirects = max_redirects
         self.retries = retries
         self.backoff_retries = backoff_retries
+        # cap the raw (on-the-wire) response body; None = unlimited. Protects memory
+        # against a hostile/huge response — the h2 stream is RST once it is exceeded.
+        self.max_response_bytes = max_response_bytes
         self._rl = RateLimiter(rate_limit)   # per-host requests/second
         self._pool = {}                  # (host, port) -> [H2Connection, ...]
         self._draining = []              # evicted conns awaiting safe close
         self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._creating = set()           # keys with a connect in flight (single-flight)
 
     # ---- connection pool (multiple h2 connections per host) -------------------
     def _evict_closed(self, conns):
@@ -186,41 +256,62 @@ class Session:
             except Exception: pass
 
     def _existing_conn(self, host, port, proxy):
-        """Non-blocking: return a warm acquired connection (ref held), or None."""
+        """Non-blocking: return a warm acquired connection (ref held), or None.
+        Also sweeps drained conns whose reader already exited — on an all-warm async
+        path _get_conn (which reaps) is never hit, so _draining would otherwise grow."""
+        dead, result = [], None
         with self._lock:
+            live = []                            # drop self-torn-down conns (cheap, no join)
+            for c in self._draining:
+                (live if c._reader.is_alive() else dead).append(c)
+            self._draining = live
             conns = self._pool.get((host, port, proxy))
-            if not conns:
-                return None
-            self._evict_closed(conns)
-            for c in conns:
-                if c.acquire():
-                    return c
-        return None
+            if conns:
+                self._evict_closed(conns)
+                for c in sorted(conns, key=lambda c: c.active()):   # least-loaded first
+                    if c.acquire():
+                        result = c
+                        break
+        for c in dead:
+            try: c.close()                       # reader gone -> close() won't join
+            except Exception: pass
+        return result
 
     def _get_conn(self, host, port, timeout, proxy):
         key = (host, port, proxy)
         self._reap()                         # reclaim drained conns on the cold path
+        # Single-flight per key: a burst of concurrent requests to a cold host must
+        # NOT each open its own connection (that both explodes fd/thread count and,
+        # for h2, is a non-browser fingerprint — Firefox coalesces an origin onto ONE
+        # multiplexed connection). Only one caller connects at a time per key; the
+        # rest wait, then reuse the connection it created (or, once it is saturated,
+        # take a turn creating the next). Creation still happens OUTSIDE the lock so a
+        # slow TLS handshake never blocks the pool.
         with self._lock:
-            conns = self._pool.setdefault(key, [])
-            self._evict_closed(conns)
-            for c in conns:
-                if c.acquire():
-                    return c
-            at_cap = len(conns) >= self.max_conns
-        if at_cap:
-            with self._lock:                 # all busy -> try least-loaded
-                for c in sorted(self._pool.get(key, []), key=lambda c: c.active()):
+            while True:
+                conns = self._pool.setdefault(key, [])
+                self._evict_closed(conns)
+                for c in sorted(conns, key=lambda c: c.active()):   # least-loaded first
                     if c.acquire():
                         return c
-        # create outside the lock (TLS handshake is slow); may briefly over-provision
-        tp = _native.Transport(host, port, timeout, self.verify, proxy)
-        if tp.alpn() != "h2":
-            return ("h1", tp)
-        c = h2conn.H2Connection(tp)
-        c.acquire()                          # ref for the caller; released by _send
-        with self._lock:
-            self._pool.setdefault(key, []).append(c)
-        return c
+                if key in self._creating:    # someone is connecting; wait and re-check
+                    self._cv.wait(timeout=max(1.0, timeout))
+                    continue
+                self._creating.add(key)      # we are the connector
+                break
+        try:
+            tp = _native.Transport(host, port, timeout, self.verify, proxy)
+            if tp.alpn() != "h2":
+                return ("h1", tp)
+            c = h2conn.H2Connection(tp)
+            c.acquire()                      # ref for the caller; released by _send
+            with self._lock:
+                self._pool.setdefault(key, []).append(c)
+            return c
+        finally:
+            with self._lock:
+                self._creating.discard(key)
+                self._cv.notify_all()        # wake waiters to reuse / take next turn
 
     def _should_try_h3(self, host, port):
         if self.h3 is False or port != 443 or not h3.available():
@@ -237,18 +328,24 @@ class Session:
             except Exception:
                 pass
         last = None
-        for _ in range(self.retries):
+        max_bytes = self.max_response_bytes or 0
+        attempts = self.retries if method in IDEMPOTENT else 1   # don't re-send POST/PATCH
+        for _ in range(max(1, attempts)):
             try:
                 conn = self._get_conn(host, port, timeout, proxy)
                 if isinstance(conn, tuple):             # http/1.1
                     tp = conn[1]
                     try:
                         st, rh, bd = http1.request(tp, method, path, authority, hdrs, body)
-                        return Response(st, rh, bd, "http/1.1", f"{scheme}://{authority}{path}")
+                        return Response(st, rh, bd, "http/1.1", f"{scheme}://{authority}{path}",
+                                        max_bytes)
                     finally:
                         tp.close()
-                st, rh, bd = conn.request(method, path, authority, hdrs, body, timeout=timeout)
-                return Response(st, rh, bd, "h2", f"{scheme}://{authority}{path}")
+                st, rh, bd = conn.request(method, path, authority, hdrs, body,
+                                          timeout=timeout, max_bytes=max_bytes)
+                return Response(st, rh, bd, "h2", f"{scheme}://{authority}{path}", max_bytes)
+            except TimeoutError:                    # response timed out: RST already sent,
+                raise                               # re-sending would just duplicate work
             except (ConnectionError, IOError) as e:
                 last = e
         raise last
@@ -270,10 +367,13 @@ class Session:
     def request(self, method, url, headers=None, data=None, json=None, params=None,
                 cookies=None, timeout=15, allow_redirects=True, proxy=None, proxies=None):
         method = method.upper()
+        if isinstance(headers, dict):                     # accept a dict or a list of pairs
+            headers = list(headers.items())
         proxy = _parse_proxy(proxy or proxies) or self.proxy
         body, base_hdrs = self._prepare_body(data, json)
         merged_params = {**self.params, **(params or {})}
         history = []
+        redirect_site = None                              # set on redirect hops (Sec-Fetch-Site)
         t0 = time.time()
         for hop in range(self.max_redirects + 1):
             u = urlsplit(url)
@@ -284,7 +384,7 @@ class Session:
             if u.query: path += "?" + u.query
             if merged_params: path += ("&" if "?" in path else "?") + urlencode(merged_params)
 
-            hdrs = self._build_headers(headers, base_hdrs, host, path, u.scheme, cookies)
+            hdrs = self._build_headers(headers, base_hdrs, host, path, u.scheme, cookies, redirect_site)
             resp = self._do_hop(method, host, port, path, authority, hdrs, body, timeout, u.scheme, proxy)
             resp.url = url
             # store cookies
@@ -297,6 +397,10 @@ class Session:
                     and "location" in resp.headers:
                 history.append(resp)
                 url = urljoin(url, resp.headers["location"])
+                redirect_site = _sec_fetch_site(u.scheme, host, port, urlsplit(url))
+                if headers and urlsplit(url).hostname != host:    # don't leak creds cross-host
+                    headers = [(k, v) for k, v in headers
+                               if k.lower() not in _SENSITIVE_ON_REDIRECT]
                 if resp.status_code in (301, 302, 303) and method in ("POST", "PUT", "PATCH"):
                     if method == "POST" or resp.status_code == 303:
                         method, body, base_hdrs = "GET", b"", []   # browser semantics
@@ -321,7 +425,8 @@ class Session:
             body = b""
         return body, extra
 
-    def _build_headers(self, req_headers, body_hdrs, host, path, scheme, cookies):
+    def _build_headers(self, req_headers, body_hdrs, host, path, scheme, cookies,
+                       redirect_site=None):
         base = list(self.headers if req_headers is None else req_headers)
         # insert Cookie after accept-encoding (Firefox position)
         jar_cookie = self.cookies.header_for(host, path, scheme == "https")
@@ -330,8 +435,17 @@ class Session:
             jar_cookie = (jar_cookie + "; " + extra).strip("; ") if jar_cookie else extra
         out = []
         for k, v in base:
+            kl = k.lower()
+            # On a redirect hop, correct the navigation headers (value-only, order kept):
+            # Sec-Fetch-Site is no longer 'none', and Sec-Fetch-User (user-activation
+            # only) is dropped — matching how Firefox re-issues a redirected navigation.
+            if redirect_site is not None:
+                if kl == "sec-fetch-site":
+                    v = redirect_site
+                elif kl == "sec-fetch-user":
+                    continue
             out.append((k, v))
-            if k.lower() == "accept-encoding" and jar_cookie:
+            if kl == "accept-encoding" and jar_cookie:
                 out.append(("cookie", jar_cookie))
         out.extend(body_hdrs)
         return out

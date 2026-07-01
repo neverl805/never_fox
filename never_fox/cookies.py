@@ -24,8 +24,17 @@ class CookieJar:
             jar.load(raw)
         except Exception:
             return
+        host = (host or "").lower()
         for name, m in jar.items():
-            domain = (m["domain"] or host).lstrip(".").lower()
+            if m["domain"]:
+                # an explicit Domain must cover the host and not be a bare public suffix
+                # (a single label like "com") — otherwise reject, so a server can't scope
+                # a cookie to an unrelated/too-broad domain.
+                domain = m["domain"].lstrip(".").lower()
+                if "." not in domain or not (host == domain or host.endswith("." + domain)):
+                    continue
+            else:
+                domain = host
             path = m["path"] or "/"
             secure = bool(m["secure"])
             expires = None
@@ -43,7 +52,7 @@ class CookieJar:
             self._c[(domain, path, name)] = _C(name, m.value, domain, path, secure, expires)
 
     def header_for(self, host, path, secure):
-        host = host.lower(); now = time.time(); out = []
+        host = host.lower(); now = time.time(); matched = []
         for key, c in list(self._c.items()):
             if c.expires and c.expires < now:
                 self._c.pop(key, None); continue
@@ -53,8 +62,10 @@ class CookieJar:
                 continue
             if c.secure and not secure:
                 continue
-            out.append(f"{c.name}={c.value}")
-        return "; ".join(out)
+            matched.append(c)
+        # RFC 6265: cookies with longer (more specific) paths are sent first.
+        matched.sort(key=lambda c: len(c.path), reverse=True)
+        return "; ".join(f"{c.name}={c.value}" for c in matched)
 
     def as_dict(self):
         return {c.name: c.value for c in self._c.values()}

@@ -15,6 +15,7 @@ MAX_FRAME = 16384
 
 DATA, HEADERS, RST, SETTINGS, PING, GOAWAY, WINDOW_UPDATE, CONTINUATION = 0,1,3,4,6,7,8,9
 F_END_STREAM, F_ACK, F_END_HEADERS, F_PRIORITY = 0x1, 0x1, 0x4, 0x20
+E_CANCEL = 0x8               # RST_STREAM error code: request cancelled by the client
 # Firefox sends stream priority inside the request HEADERS frame: dep=0, weight byte=41.
 FF_HEADERS_PRIORITY = struct.pack(">I", 0) + bytes([41])
 
@@ -24,11 +25,13 @@ def _frame(ftype, flags, sid, payload=b""):
 
 
 class _Stream:
-    __slots__ = ("status", "headers", "chunks", "done", "error", "future", "loop", "sid")
+    __slots__ = ("status", "headers", "chunks", "done", "error", "future", "loop",
+                 "sid", "nbytes", "max_bytes")
     def __init__(self):
         self.status = None; self.headers = []; self.chunks = []
         self.done = threading.Event(); self.error = None
         self.future = None; self.loop = None; self.sid = 0
+        self.nbytes = 0; self.max_bytes = 0        # 0 = unlimited
 
 
 class H2Connection:
@@ -102,8 +105,9 @@ class H2Connection:
         elif ftype == DATA:
             st = self._get(sid)
             end = bool(flags & F_END_STREAM)
-            if st is not None:
+            if st is not None and not st.done.is_set():
                 st.chunks.append(payload)
+                st.nbytes += len(payload)
                 if payload:
                     # replenish connection window always; replenish the stream
                     # window only while the stream is still open (WINDOW_UPDATE on a
@@ -113,7 +117,15 @@ class H2Connection:
                         upd += _frame(WINDOW_UPDATE, 0, sid, struct.pack(">I", len(payload)))
                     with self._send_lock:
                         self.tp.write(upd)
-                if end: self._finish(st)
+                if st.max_bytes and st.nbytes > st.max_bytes:
+                    # bound memory on a hostile/huge response: cancel the stream so the
+                    # server stops sending, then fail it (the caller sees the error).
+                    self._rst(sid, E_CANCEL)
+                    st.error = ConnectionError(
+                        f"response exceeded max_response_bytes ({st.max_bytes})")
+                    self._finish(st)
+                elif end:
+                    self._finish(st)
         elif ftype == SETTINGS:
             if not (flags & F_ACK):
                 for i in range(0, len(payload), 6):     # track MAX_CONCURRENT_STREAMS (id 3)
@@ -141,6 +153,19 @@ class H2Connection:
     def _get(self, sid):
         with self._slock: return self._streams.get(sid)
 
+    def _rst(self, sid, code=E_CANCEL):
+        """Send RST_STREAM to cancel a stream (timeout / caller cancel / over-cap).
+        Without this the server keeps streaming a body no one will read — wasting its
+        and our bandwidth and a multiplexing slot. Best-effort: skip if the connection
+        is already going away."""
+        if self.closed or self._closing:
+            return
+        try:
+            with self._send_lock:
+                self.tp.write(_frame(RST, 0, sid, struct.pack(">I", code)))
+        except Exception:
+            pass
+
     def _finish(self, st):
         """Mark a stream complete: wake the sync waiter and/or resolve the async future."""
         st.done.set()
@@ -162,13 +187,13 @@ class H2Connection:
                 st.error = exc; self._finish(st)
 
     # ---- public API ----
-    def _send(self, method, path, authority, headers, body, future=None, loop=None):
+    def _send(self, method, path, authority, headers, body, future=None, loop=None, max_bytes=0):
         # the caller (pool) holds one ref on this connection; release it once the
         # write is done so close() can never free the transport mid-write.
         try:
             if self.closed:
                 raise ConnectionError("h2 connection closed")
-            st = _Stream(); st.future = future; st.loop = loop
+            st = _Stream(); st.future = future; st.loop = loop; st.max_bytes = max_bytes or 0
             hdr_list = [(":method", method), (":path", path),
                         (":authority", authority), (":scheme", "https")]
             hdr_list += [(k.lower(), v) for k, v in headers]
@@ -182,15 +207,15 @@ class H2Connection:
                 # stream it upsets some servers, so keep it to stream 1.
                 end = F_END_STREAM if not body else 0
                 if sid == 1:
-                    out = _frame(HEADERS, F_END_HEADERS | F_PRIORITY | end, sid, FF_HEADERS_PRIORITY + block)
+                    out = [_frame(HEADERS, F_END_HEADERS | F_PRIORITY | end, sid, FF_HEADERS_PRIORITY + block)]
                 else:
-                    out = _frame(HEADERS, F_END_HEADERS | end, sid, block)
-                mv = memoryview(body)
+                    out = [_frame(HEADERS, F_END_HEADERS | end, sid, block)]
+                mv = memoryview(body)                       # list + join, not O(n^2) `+=`
                 for i in range(0, len(body), MAX_FRAME):
                     chunk = mv[i:i + MAX_FRAME]
                     last = i + MAX_FRAME >= len(body)
-                    out += _frame(DATA, F_END_STREAM if last else 0, sid, bytes(chunk))
-                self.tp.write(out)
+                    out.append(_frame(DATA, F_END_STREAM if last else 0, sid, bytes(chunk)))
+                self.tp.write(b"".join(out))
             return st
         finally:
             self.release()
@@ -198,20 +223,22 @@ class H2Connection:
     def _pop(self, sid):
         with self._slock: self._streams.pop(sid, None)
 
-    def request(self, method, path, authority, headers, body=b"", timeout=30):
+    def request(self, method, path, authority, headers, body=b"", timeout=30, max_bytes=0):
         """Synchronous: blocks the calling thread until the response is complete."""
-        st = self._send(method, path, authority, headers, body)
+        st = self._send(method, path, authority, headers, body, max_bytes=max_bytes)
         ok = st.done.wait(timeout)
+        if not ok:
+            self._rst(st.sid, E_CANCEL)      # stop the server; don't leak a half-open stream
         self._pop(st.sid)
         if not ok:
             raise TimeoutError(f"h2 request timeout after {timeout}s")
         if st.error: raise st.error
         return st.status, st.headers, b"".join(st.chunks)
 
-    def send_async(self, method, path, authority, headers, body, future, loop):
+    def send_async(self, method, path, authority, headers, body, future, loop, max_bytes=0):
         """Async: returns the stream; the reader thread resolves `future` with
         (status, headers, body_bytes). Does not block the event loop."""
-        return self._send(method, path, authority, headers, body, future, loop)
+        return self._send(method, path, authority, headers, body, future, loop, max_bytes=max_bytes)
 
     def active(self):
         with self._slock:

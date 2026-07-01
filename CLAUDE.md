@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`fxtls_config.h`** → `fxtls_configure()` is the **single source of truth for the ClientHello**: cipher suite list+order, named groups, signature schemes, ALPN, cert-compression algs, ECH GREASE size (100 → the genuine 281-byte ECH extension), `SSL_RECORD_SIZE_LIMIT=16385`, etc. Edit fingerprint behavior here.
 - **`firefox152_reference.json`** → the authoritative captured Firefox 152 fingerprint. `verify.py` diffs the engine's actual ClientHello against this, field-by-field and byte-for-byte (random/session_id/key_share/ECH payload masked). **If you change `fxtls_config.h`, this reference and `verify.py`'s `FIELDS` list are what you reconcile against.**
 - NSS itself is **never compiled here** — it comes prebuilt from each platform's package manager (Homebrew / apt / MSYS2). `build.py` finds it via `pkg-config` and compiles only the ~250-line shim (seconds).
+- **`native/h3/`** → the HTTP/3 backend build (separate from the TLS shim). `build_h3.py` clones pinned `mozilla/neqo` + `mozilla/nss-rs`, overlays never_fox's patched files from `native/h3/files/`, wires a Cargo `[patch]` so neqo links the patched nss-rs, and builds `neqo-client`. The patched `crypto.rs` makes the QUIC ClientHello match Firefox 152 (GREASE off, fixed extension order, SCT, ECH GREASE, FF sig-alg order, cert compression); the patched nss-rs adds ffdhe2048/3072, delegated credentials, `SSL_SignatureSchemePrefSet`, and RFC 8879 cert (de)compression. This build **does** compile NSS from source (needs rustup/cargo, libclang, mercurial, ninja, gyp-next) — heavy, minutes; `H3_NSS_DIR` reuses a prebuilt NSS to skip it. The clones and `native/neqo/` are gitignored (~343 MB); only the resulting `neqo-client` gets staged into the wheel.
 
 ### 2. Python protocol + client layer (`never_fox/`)
 - **`_native.py`** — `ctypes` binding to `libfxtls`. The `Transport` class wraps one connection. Binary-safe (never uses `c_char_p`; h2 frames contain NUL). **NSS is initialized once at import time, single-threaded** (`_lib.fxtls_have_roots()` at module top) because `fxtls__ensure_init` is not internally locked — two threads cold-starting a pool would race `NSS_NoDB_Init` and crash.
@@ -22,7 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **`h2conn.py`** — persistent multiplexing HTTP/2 connection. A single background reader thread dispatches frames to per-stream buffers so many Python threads (or asyncio futures) share one connection. `FF_SETTINGS`, the connection `WINDOW_UPDATE` increment, the pseudo-header order, and the priority-in-HEADERS behavior are all tuned to match Firefox's Akamai HTTP/2 fingerprint. HPACK encode+send is done atomically under `_send_lock` (HPACK is stateful).
 - **`aio.py`** — `AsyncSession`. Reuses the sync `Session`'s pool/cookies. Warm h2 requests are awaited via asyncio futures the reader thread resolves with `call_soon_threadsafe` → **thread count ≈ connection count, not request count**. Only the TLS handshake, HTTP/1.1, and the h3 subprocess hit the executor.
 - **`http1.py`** — HTTP/1.1 fallback (used only when ALPN negotiates `http/1.1`).
-- **`h3.py`** — experimental HTTP/3 via the real `neqo` client as a subprocess. Any failure raises and the caller silently falls back to h2, so h3 can never break a request. Status/headers parsing is best-effort (a cdylib upgrade is planned). The `neqo/` clone is gitignored (~343 MB).
+- **`h3.py`** — experimental HTTP/3 via a **bundled `neqo-client`** binary (Firefox's real QUIC/h3 stack, patched to match the FF152 ClientHello — see `native/h3/` below) driven as a subprocess. The binary is resolved from `never_fox/_lib/` (wheel) or the dev source tree; the body is read back via neqo's `--output-dir` (writing to a temp file). Any failure — missing binary, UDP/443 blocked, idle timeout, non-zero exit — raises, and the caller silently falls back to h2, so h3 can never break a request. **Current CLI-path limits:** status is hard-coded `200`, response headers are absent (content-encoding is *sniffed* from body magic bytes), and request bodies (POST/PUT) aren't supported (they fall back to h2). A cdylib upgrade to fix status/headers is planned. h3 is opt-in per host: `client.py` only tries it after an `Alt-Svc: h3` advertisement (`_note_altsvc`/`_host_has_h3`).
 - **`cookies.py`** — lightweight cookie jar (domain/path matching + expiry).
 
 ### Library resolution (dev vs installed)
@@ -54,6 +55,10 @@ python native/stage_lib.py
 
 # Build a platform-specific wheel (py3-none-<platform>, see setup.py)
 python -m pip wheel . --no-deps -w dist
+
+# (Optional) Build the HTTP/3 backend — clones+patches mozilla/neqo, compiles NSS
+# from source. Heavy (minutes). Produces native/h3/neqo-client. See native/h3/.
+python native/h3/build_h3.py
 ```
 
 System deps before building (prebuilt NSS etc.):

@@ -13,6 +13,7 @@ fall back to h2.
 """
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -91,8 +92,52 @@ def _sniff_encoding(body):
         return None
 
 
+_HDR_RE = re.compile(
+    r'name:\s*"((?:[^"\\]|\\.)*)"\s*,\s*value:\s*(\[[^\]]*\]|"(?:[^"\\]|\\.)*")')
+
+
+def _parse_response(stderr):
+    """Recover the real (status, headers) from neqo-client's debug log. neqo logs the
+    response headers at debug level:
+        READ HEADERS[<sid>]: fin=<bool> [Header { name: ":status", value: ... }, ...]
+    A Header's value is either a quoted string or a byte list (Vec<u8> Debug); handle
+    both. Returns (status:int|None, headers:list[(name,value)]). None status => caller
+    must fall back to h2 rather than inventing a status.
+
+    NOTE: this parses a Rust {:?} debug format, so it is validated against a real
+    neqo-client build (CI); until then a parse miss simply routes the request to h2."""
+    if isinstance(stderr, (bytes, bytearray)):
+        stderr = stderr.decode("utf-8", "replace")
+    status, out = None, []
+    for line in stderr.splitlines():
+        if "READ HEADERS" not in line:
+            continue
+        line_status, line_headers = None, []
+        for name, rawval in _HDR_RE.findall(line):
+            name = name.encode().decode("unicode_escape").lower()
+            if rawval.startswith("["):                       # value: [104, 105, ...] (bytes)
+                try:
+                    val = bytes(int(x) for x in rawval[1:-1].split(",") if x.strip()
+                                ).decode("utf-8", "replace")
+                except ValueError:
+                    val = ""
+            else:                                            # value: "..." (string)
+                val = rawval[1:-1].encode().decode("unicode_escape")
+            if name == ":status":
+                try: line_status = int(val)
+                except ValueError: pass
+            elif not name.startswith(":"):
+                line_headers.append((name, val))
+        if line_status is not None and line_status >= 200:   # final response (skip 1xx)
+            status, out = line_status, line_headers
+    return status, out
+
+
 def request(method, url, headers, body=b"", timeout=15):
-    """One HTTP/3 request via neqo. Returns (status, headers, body) or raises."""
+    """One HTTP/3 request via neqo. Returns the REAL (status, headers, body) or raises
+    (the caller then falls back to h2). We no longer fabricate a 200: a response whose
+    status/headers we cannot read is treated as an h3 failure so status codes and
+    Set-Cookie are never silently lost."""
     if not available():
         raise RuntimeError("neqo-client not bundled")
     if body:                                              # CLI path can't upload a body yet
@@ -114,18 +159,27 @@ def request(method, url, headers, body=b"", timeout=15):
             args += ["-H", f"{k}: {v}"]
         args.append(url)
 
-        proc = subprocess.run(args, capture_output=True, timeout=timeout, env=_env())
+        env = _env()
+        # ask neqo to log the response headers so we can read the true status + Set-Cookie
+        env.setdefault("RUST_LOG", "neqo_bin=debug,neqo_http3=info,neqo_transport=info")
+        proc = subprocess.run(args, capture_output=True, timeout=timeout, env=env)
+
+        status, rh = _parse_response(proc.stderr)
+        if status is None:                               # unknown status -> fall back to h2
+            tail = proc.stderr[-200:] if proc.stderr else b""
+            raise RuntimeError(f"h3: could not read response status (exit={proc.returncode}): {tail!r}")
 
         # neqo writes the body to a file named after the URL path (possibly nested).
         files = [os.path.join(dp, f) for dp, _, fs in os.walk(outdir) for f in fs]
-        if not files:
-            tail = proc.stderr[-200:] if proc.stderr else b""
-            raise RuntimeError(f"h3: no response body (exit={proc.returncode}): {tail!r}")
-        with open(max(files, key=os.path.getmtime), "rb") as fh:
-            data = fh.read()
+        data = b""
+        if files:
+            with open(max(files, key=os.path.getmtime), "rb") as fh:
+                data = fh.read()
 
-        enc = _sniff_encoding(data)
-        rh = [("content-encoding", enc)] if enc else []
-        return 200, rh, data                             # status: cdylib upgrade
+        if data and not any(k == "content-encoding" for k, _ in rh):
+            enc = _sniff_encoding(data)                  # headers lacked it -> sniff the body
+            if enc:
+                rh.append(("content-encoding", enc))
+        return status, rh, data
     finally:
         shutil.rmtree(outdir, ignore_errors=True)

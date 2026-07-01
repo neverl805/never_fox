@@ -47,6 +47,10 @@ class Transport:
         self.host = host
         self._stop = False
         self._peer_eof = False                   # set once a read sees the peer close (EOF/RST)
+        # One reusable 64K read buffer per connection: recv/recvn are only ever called
+        # by this connection's single I/O thread (the h2 reader, or the h1 caller), so
+        # reuse is safe and avoids a fresh ctypes allocation on every frame/read.
+        self._rbuf = ctypes.create_string_buffer(65536)
         if proxy:                                # (scheme, host, port, user, pass)
             scheme, ph, pp, user, pw = proxy
             if scheme.startswith("socks"):
@@ -88,7 +92,7 @@ class Transport:
 
     def recv(self, n: int) -> bytes:
         """Read up to n bytes (b'' on EOF). Retries through read timeouts (bounded)."""
-        buf = ctypes.create_string_buffer(n)
+        buf = self._rbuf if n <= 65536 else ctypes.create_string_buffer(n)
         for _ in range(480):                     # ~120s cap of idle waiting (480 * 250ms)
             r = _lib.fxtls_read(self.ctx, buf, n)
             if r == -2:                          # read timeout -> retry
@@ -104,7 +108,7 @@ class Transport:
         """Read up to n bytes for the reader thread; returns short (not raises) on
         EOF or when stop_reads() is set, so the reader loop can exit cleanly."""
         out = bytearray()
-        buf = ctypes.create_string_buffer(65536)
+        buf = self._rbuf
         while len(out) < n:
             r = _lib.fxtls_read(self.ctx, buf, min(65536, n - len(out)))
             if r == -2:                          # timeout: bail if closing, else keep waiting
