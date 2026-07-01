@@ -35,7 +35,6 @@ def pkg_libdir(mod):
 # ---------------- macOS ----------------
 def _bundle_macos():
     MAIN = os.path.join(HERE, "libfxtls.dylib")
-    SYS = ("/usr/lib/", "/System/")
     if not os.path.exists(MAIN):
         sys.exit("build libfxtls.dylib first (python native/build.py)")
     shutil.rmtree(VENDOR, ignore_errors=True); os.makedirs(VENDOR)
@@ -54,16 +53,31 @@ def _bundle_macos():
     def deps(lib):
         return [m.group(1) for m in (re.match(r"\s+(\S+)\s+\(", l)
                 for l in sh("otool", "-L", lib).stdout.splitlines()[1:]) if m]
-    ext = lambda p: not p.startswith("@") and not p.startswith(SYS)
-    for dep in deps(MAIN):
-        if ext(dep) and os.path.basename(dep) != "libfxtls.dylib":
-            sh("install_name_tool", "-change", dep, f"@loader_path/vendor/{os.path.basename(dep)}", MAIN)
+
+    # Rewrite every dependency that points at a lib we vendored to a @loader_path
+    # reference — regardless of the prefix the original recorded (an absolute
+    # Homebrew path, OR a @rpath/@loader_path-relative one). NSS records absolute
+    # paths, but Homebrew's brotli records its sibling as @rpath/libbrotlicommon.1
+    # .dylib with an rpath of @loader_path/../lib. The old "skip anything starting
+    # with @" filter left that @rpath dep untouched, so the vendored brotli could
+    # not find brotlicommon on any machine without Homebrew (dlopen failure at
+    # import). Keying on "basename is one we copied" fixes both cases; a dep we did
+    # not vendor (e.g. /usr/lib/libSystem) is left alone.
+    def relink(lib, ref_for):
+        this = os.path.basename(lib)
+        for dep in deps(lib):
+            base = os.path.basename(dep)
+            if base == this or base not in copied:   # self-id or a system lib: leave it
+                continue
+            ref = ref_for(base)
+            if dep != ref:
+                sh("install_name_tool", "-change", dep, ref, lib)
+
+    relink(MAIN, lambda base: f"@loader_path/vendor/{base}")
     for b in copied:
         lib = os.path.join(VENDOR, b)
         sh("install_name_tool", "-id", f"@loader_path/{b}", lib)
-        for dep in deps(lib):
-            if ext(dep):
-                sh("install_name_tool", "-change", dep, f"@loader_path/{os.path.basename(dep)}", lib)
+        relink(lib, lambda base: f"@loader_path/{base}")
     for b in list(copied) + ["../libfxtls.dylib"]:
         sh("codesign", "--force", "--sign", "-", os.path.join(VENDOR, b))
     print(f"OK macOS: vendored {len(copied)} dylibs (@loader_path)")
